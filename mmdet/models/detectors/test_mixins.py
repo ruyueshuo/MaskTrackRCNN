@@ -5,6 +5,8 @@ from mmdet.core import (bbox2roi, bbox_mapping, merge_aug_proposals,
 class RPNTestMixin(object):
 
     def simple_test_rpn(self, x, img_meta, rpn_test_cfg):
+        # rpn_outs:tuple 1) list: clc scores for each feature map
+        # 2) list: list box results for each feature map
         rpn_outs = self.rpn_head(x)
         proposal_inputs = rpn_outs + (img_meta, rpn_test_cfg)
         proposal_list = self.rpn_head.get_bboxes(*proposal_inputs)

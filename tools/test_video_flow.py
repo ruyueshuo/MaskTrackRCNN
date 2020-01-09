@@ -42,7 +42,7 @@ def single_test(model, data_loader, cfg, show=False, save_path=''):
             img_np = mmcv.impad_to_multiple(img_np, cfg.data.test.size_divisor)
             data['img'][0]= torch.from_numpy(np.transpose(img_np, (2, 0, 1))).unsqueeze(0).to(device)
 
-            # change image meta info.
+            # change image meta info according to scale factor change.
             img_meta[0][0]['img_shape'] = (int(img_meta[0][0]['img_shape'][0] * scale_factor),
                                         int(img_meta[0][0]['img_shape'][1] * scale_factor), 3)
             img_meta[0][0]['pad_shape'] = img_np.shape
@@ -150,9 +150,7 @@ def main():
         shuffle=False)
     if args.load_result:
         outputs = mmcv.load(args.out)
-        # import json
-        # with open(args.out+'.json', "w") as f:
-        #     json.dump(outputs, f)
+
     else:
         # test
         outputs = single_test(model, data_loader, cfg, args.show, save_path=args.save_path)

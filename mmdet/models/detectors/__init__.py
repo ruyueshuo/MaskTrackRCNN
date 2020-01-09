@@ -7,8 +7,12 @@ from .faster_rcnn import FasterRCNN
 from .mask_rcnn import MaskRCNN
 from .cascade_rcnn import CascadeRCNN
 from .retinanet import RetinaNet
+from .mask_rcnn_flow import MaskRCNNFlow
+from .base import BaseDetector
+from .test_mixins import RPNTestMixin, BBoxTestMixin, MaskTestMixin
 
 __all__ = [
     'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',
-    'FastRCNN', 'FasterRCNN', 'MaskRCNN', 'CascadeRCNN', 'RetinaNet'
+    'FastRCNN', 'FasterRCNN', 'MaskRCNN', 'CascadeRCNN', 'RetinaNet', 'MaskRCNNFlow',
+    'RPNTestMixin', 'BBoxTestMixin', 'MaskTestMixin'
 ]

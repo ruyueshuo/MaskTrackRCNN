@@ -9,7 +9,13 @@ from torch.utils.data.sampler import Sampler
 
 
 class GroupSampler(Sampler):
-
+    """ Every Sampler subclass has to provide an :meth:`__iter__` method, providing a
+        way to iterate over indices of dataset elements, and a :meth:`__len__` method
+        that returns the length of the returned iterators.
+        .. note:: The :meth:`__len__` method isn't strictly required by
+                  :class:`~torch.utils.data.DataLoader`, but is expected in any
+                  calculation involving the length of a :class:`~torch.utils.data.DataLoader`.
+        """
     def __init__(self, dataset, samples_per_gpu=1):
         assert hasattr(dataset, 'flag')
         self.dataset = dataset

@@ -18,36 +18,39 @@ from mmcv.runner import load_checkpoint
 from .flow_utils import conv, predict_flow, deconv, crop_like, correlate
 from .flownetC import FlowNetC
 from ..registry import HEADS
-
+from .correlation_package.correlation import Correlation
+from .propagation_utils import warp
 
 @HEADS.register_module
 class FlowNetCHead(FlowNetC):
 
-    def __init__(self):
+    def __init__(self, checkpoint=None):
         super(FlowNetCHead, self).__init__()
+        if checkpoint:
+            self.checkpoint = checkpoint
 
-    def forward(self, x, out_conv2a):
+        # Correlation function in FlowNet2 by Nvidia.
+        # See https://github.com/NVIDIA/flownet2-pytorch for details.
+        self.corr = Correlation(pad_size=20, kernel_size=1, max_displacement=20, stride1=1, stride2=2, corr_multiply=1)
+        self.corr_activation = nn.LeakyReLU(0.1,inplace=True)
+
+    def forward(self, x, y):
         """
-
-        :param x: feature map (48, 64, 512)
-        :return:flow
+        :param x: tensor, feature map of low resolution current frame (b, 256, 48, 64)
+        :param y: list, feature map of high resolution key frame (b, 256, 48, 64)
+                  and resnet out0 of high resolution key frame (b, 128, 96, 128)
+        :return:flow: tensor, (b, 2, 96, 128)
         """
-        # x1 = x[:, :3]
-        # x2 = x[:, 3:]
+        out_conv2a = y[0]
+        out_conv3a = y[1]
+        out_conv3b = x
 
-        # out_conv1a = self.conv1(x1)
-        # out_conv2a = self.conv2(out_conv1a)
-        # out_conv3a = self.conv3(out_conv2a)
-        #
-        # out_conv1b = self.conv1(x2)
-        # out_conv2b = self.conv2(out_conv1b)
-        # out_conv3b = self.conv3(out_conv2b)
-        out_conv3a = x[:, : 256]
-        out_conv3b = x[:, 256:]
-        # out_conv2a = x
+        assert out_conv3a.shape == out_conv3b.shape
 
         out_conv_redir = self.conv_redir(out_conv3a)
-        out_correlation = correlate(out_conv3a, out_conv3b)
+        # out_correlation = correlate(out_conv3a, out_conv3b)
+        out_corr = self.corr(out_conv3a, out_conv3b)  # False
+        out_correlation = self.corr_activation(out_corr)
 
         in_conv3_1 = torch.cat([out_conv_redir, out_correlation], dim=1)
 
@@ -83,22 +86,22 @@ class FlowNetCHead(FlowNetC):
         else:
             return flow2
 
-    def init_weights(self, pretrained=None):
-        if isinstance(pretrained, str):
-            logger = logging.getLogger()
-            load_checkpoint(self, pretrained, strict=False, logger=logger)
-        # elif pretrained is None:
-        #     for m in self.modules():
-        #         if isinstance(m, nn.Conv2d):
-        #             kaiming_init(m)
-        #         elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-        #             constant_init(m, 1)
-        #
-        #     if self.zero_init_residual:
-        #         for m in self.modules():
-        #             if isinstance(m, Bottleneck):
-        #                 constant_init(m.norm3, 0)
-        #             elif isinstance(m, BasicBlock):
-        #                 constant_init(m.norm2, 0)
+    def init_weights(self):
+        """load checkpoint."""
+        load_checkpoint(self, self.checkpoint)
+
+    @staticmethod
+    def flow2rgb(flow_map, max_value):
+        """flow to rgb images files"""
+        flow_map_np = flow_map.detach().cpu().numpy()
+        _, h, w = flow_map_np.shape
+        flow_map_np[:, (flow_map_np[0] == 0) & (flow_map_np[1] == 0)] = float('nan')
+        rgb_map = np.ones((3, h, w)).astype(np.float32)
+        if max_value is not None:
+            normalized_flow_map = flow_map_np / max_value
         else:
-            raise TypeError('pretrained must be a str or None')
+            normalized_flow_map = flow_map_np / (np.abs(flow_map_np).max())
+        rgb_map[0] += normalized_flow_map[0]
+        rgb_map[1] -= 0.5 * (normalized_flow_map[0] + normalized_flow_map[1])
+        rgb_map[2] += normalized_flow_map[1]
+        return rgb_map.clip(0, 1)

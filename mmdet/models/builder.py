@@ -5,6 +5,13 @@ from .registry import BACKBONES, NECKS, ROI_EXTRACTORS, HEADS, DETECTORS
 
 
 def _build_module(cfg, registry, default_args):
+    """
+    构建网络模型。
+    :param cfg: ConfigDict对象，配置文件，其中的‘type'定义了模型类型，如‘MaskRCNN'.
+    :param registry: Registry对象，其中的module_dict为dict,其中包含了不同模型的类函数。
+    :param default_args:
+    :return: 网络模型初始化的对象。
+    """
     assert isinstance(cfg, dict) and 'type' in cfg
     assert isinstance(default_args, dict) or default_args is None
     args = cfg.copy()

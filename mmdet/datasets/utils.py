@@ -33,7 +33,7 @@ def to_tensor(data):
             type(data)))
 
 
-def random_scale(img_scales, mode='range'):
+def random_scale(img_scales, mode='value'):
     """Randomly select a scale from a list of scales or scale ranges.
 
     Args:
@@ -47,7 +47,7 @@ def random_scale(img_scales, mode='range'):
     if num_scales == 1:  # fixed scale is specified
         img_scale = img_scales[0]
     elif num_scales == 2:  # randomly sample a scale
-        if mode == 'range':
+        if mode == 'range':  # 分别在两个尺寸大小范围内随机选择长和宽
             img_scale_long = [max(s) for s in img_scales]
             img_scale_short = [min(s) for s in img_scales]
             long_edge = np.random.randint(
@@ -57,7 +57,7 @@ def random_scale(img_scales, mode='range'):
                 min(img_scale_short),
                 max(img_scale_short) + 1)
             img_scale = (long_edge, short_edge)
-        elif mode == 'value':
+        elif mode == 'value':  # 随机选取两个尺寸中的一个
             img_scale = img_scales[np.random.randint(num_scales)]
     else:
         if mode != 'value':
@@ -75,6 +75,11 @@ def show_ann(coco, img, ann_info):
 
 
 def get_dataset(data_cfg):
+    """
+    Get dataset.
+    :param data_cfg: Data config.
+    :return: Object: instantiated dataset object of data_cfg['type']
+    """
     if data_cfg['type'] == 'RepeatDataset':
         return RepeatDataset(
             get_dataset(data_cfg['dataset']), data_cfg['times'])
@@ -101,6 +106,7 @@ def get_dataset(data_cfg):
         img_prefixes = [data_cfg['img_prefix']] * num_dset
     assert len(img_prefixes) == num_dset
 
+    # generate dataset
     dsets = []
     for i in range(num_dset):
         data_info = copy.deepcopy(data_cfg)
