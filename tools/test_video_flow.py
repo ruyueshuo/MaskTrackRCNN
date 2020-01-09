@@ -11,7 +11,8 @@ from mmdet.datasets import build_dataloader
 from mmdet.models import build_detector, detectors
 from mmdet.models.flow_heads.flownetC_head import FlowNetCHead
 
-def single_test(model, data_loader, show=False, save_path=''):
+
+def single_test(model, data_loader, cfg, show=False, save_path=''):
     model.eval()
     results = []
     import numpy as np
@@ -20,26 +21,40 @@ def single_test(model, data_loader, show=False, save_path=''):
     prog_bar = mmcv.ProgressBar(len(dataset))
     num = 0
     for i, data in enumerate(data_loader):
-        a = data['img_meta'][0].data
-        print(data['img_meta'][0])
-        if a[0][0]['is_first'] or num % 5 == 0:
+        # The image is the key frame if it is the first frame of a video
+        # or every 5 frame.
+        img_meta = data['img_meta'][0].data
+        is_first = img_meta[0][0]['is_first']
+        if is_first or num % 5 == 0:
             key_frame = True
-            # data['img']
             num = 1
         else:
             key_frame = False
-            # TODO: IMG RESIZE FOR NON-KEY FRAME
-            from mmdet.datasets.transforms import ImageTransform
-            img_transform = ImageTransform()
-            _img, img_shape, pad_shape, scale_factor = img_transform(
-                img, scale, flip, keep_ratio=resize_keep_ratio)
-            num += 1
-        with torch.no_grad():
-            result = model(return_loss=False, key_frame=key_frame, rescale=not show, **data)
-            # avg_time += result[2]
-            # print(avg_time)
-        results.append(result)
 
+            # resize image according to scale factor.
+            scale_factor = 0.5
+            img = torch.nn.functional.interpolate(data['img'][0], scale_factor=scale_factor, mode='bilinear', align_corners=True)
+            device = img.device
+            img_np = np.transpose(img.squeeze().numpy(), (1, 2, 0))
+
+            # The size of last feature map is 1/32(specially for resnet50) of the original image,
+            # Impad to ensure that the original image size is multiple of 32.
+            img_np = mmcv.impad_to_multiple(img_np, cfg.data.test.size_divisor)
+            data['img'][0]= torch.from_numpy(np.transpose(img_np, (2, 0, 1))).unsqueeze(0).to(device)
+
+            # change image meta info.
+            img_meta[0][0]['img_shape'] = (int(img_meta[0][0]['img_shape'][0] * scale_factor),
+                                        int(img_meta[0][0]['img_shape'][1] * scale_factor), 3)
+            img_meta[0][0]['pad_shape'] = img_np.shape
+            img_meta[0][0]['scale_factor'] = img_meta[0][0]['scale_factor'] * scale_factor
+
+            num += 1
+
+        with torch.no_grad():
+            result = model(return_loss=False, key_frame=key_frame, rescale=True, **data)
+
+        results.append(result)
+        show = False
         if show:
             model.module.show_result(data, result, dataset.img_norm_cfg,
                                      dataset=dataset.CLASSES,
@@ -123,8 +138,8 @@ def main():
     load_checkpoint(model, args.checkpoint)
     model = MMDataParallel(model, device_ids=[0])
 
-    model_flow = FlowNetCHead()
-    load_checkpoint(model_flow, args.checkpointflow)
+    # model_flow = FlowNetCHead()
+    # load_checkpoint(model_flow, args.checkpointflow)
 
     data_loader = build_dataloader(
         dataset,
@@ -140,7 +155,7 @@ def main():
         #     json.dump(outputs, f)
     else:
         # test
-        outputs = single_test(model, data_loader, args.show, save_path=args.save_path)
+        outputs = single_test(model, data_loader, cfg, args.show, save_path=args.save_path)
 
     if args.out:
         if not args.load_result:
@@ -160,11 +175,25 @@ def main():
 
 if __name__ == '__main__':
     # data_root = '/home/ubuntu/datasets/YT-VIS/'
-    # ann_file = data_root + 'annotations/instances_val_sub.json'
+    # ann_file = data_root + 'annotations/instances_train_sub.json'
     # import json
     # with open(ann_file, 'r') as f:
     #     ann = json.load(f)
-    #     ann['videos'] = ann['videos'][15]
+    #     # ann['videos'] = ann['videos'][15]
+    #     video_id = [0, 1, 2, 3, 4]
+    #     videos = []
+    #     anns =[]
+    #     for id in video_id:
+    #         videos.append(ann['videos'][id])
+    #         anns.append(ann['annotations'][id])
+    #     ann['videos'] = videos
+    #     ann['annotations'] = anns
+    #     # videos = ann['videos'][video_id]
+    #     # ann['videos'] = []
+    #     # ann['videos'].append(videos)
+    #     # anns = ann['annotations'][video_id]
+    #     # ann['annotations'] = []
+    #     # ann['annotations'].append(anns)
     #
     # with open(data_root + 'annotations/instances_test_sub.json', 'w') as f:
     #     json.dump(ann, f, ensure_ascii=False)

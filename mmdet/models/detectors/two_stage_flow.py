@@ -1,17 +1,20 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import mmcv
+
 from .base import BaseDetector
 from .test_mixins import RPNTestMixin, BBoxTestMixin, MaskTestMixin
 from .. import builder
 from ..registry import DETECTORS
 from mmdet.core import bbox2roi, bbox2result, build_assigner, build_sampler
 from mmdet.core import bbox_overlaps, bbox2result_with_id
+from ..flow_heads.propagation_utils import warp
 
 
 @DETECTORS.register_module
-class TwoStageDetector(BaseDetector, RPNTestMixin,
-                       MaskTestMixin):
+class TwoStageDetectorFlow(BaseDetector, RPNTestMixin,
+                           MaskTestMixin):
     """
 
     :param backbone: ConfigDict,采用的backbone网络结构
@@ -40,7 +43,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None):
-        super(TwoStageDetector, self).__init__()
+        super(TwoStageDetectorFlow, self).__init__()
         self.backbone = builder.build_backbone(backbone)
 
         if neck is not None:
@@ -68,7 +71,10 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
         self.test_cfg = test_cfg
 
         # memory queue for testing
-        self.prev_feat_maps = None
+        self.frame_info = None
+        self.key_feat_maps = None
+        self.key_feat_res0 = None
+
         self.prev_bboxes = None
         self.prev_roi_feats = None
         self.init_weights(pretrained=pretrained)
@@ -76,13 +82,14 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
     @property
     def with_rpn(self):
         return hasattr(self, 'rpn_head') and self.rpn_head is not None
+
     @property
     def with_flow(self):
-        return hasattr(self, 'flow_head') and self.flow_head is not None
+        return self.flow_head is not None
 
     def init_weights(self, pretrained=None):
         """initialize weights."""
-        super(TwoStageDetector, self).init_weights(pretrained)
+        super(TwoStageDetectorFlow, self).init_weights(pretrained)
         self.backbone.init_weights(pretrained=pretrained)
         if self.with_neck:
             if isinstance(self.neck, nn.Sequential):
@@ -100,13 +107,16 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             self.mask_head.init_weights()
         if self.with_track:
             self.track_head.init_weights()
+        if self.with_flow:
+            self.flow_head.init_weights()
 
     def extract_feat(self, img):
         """extract feature map with backbone and neck."""
-        x, feat_layer0 = self.backbone(img)
+        x, feat_res0 = self.backbone(img)
+        # feat_resnet = x
         if self.with_neck:
             x = self.neck(x)
-        return x, feat_layer0
+        return x, feat_res0
 
     def forward_train(self,
                       img,
@@ -120,8 +130,9 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
                       gt_masks=None,
                       proposals=None):
         # extract feature
-        x, _ = self.extract_feat(img)
-        ref_x, _ = self.extract_feat(ref_img)
+        x, feat_res0 = self.extract_feat(img)
+        ref_x, ref_feat_res0 = self.extract_feat(ref_img)
+
         losses = dict()
 
         # RPN forward and loss
@@ -288,44 +299,72 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
 
         return det_bboxes, det_labels, det_obj_ids
 
-    def simple_test(self, img, img_meta, proposals=None, rescale=False):
+    def simple_test(self, img, img_meta, proposals=None, rescale=False, key_frame=False):
         """Test without augmentation."""
         assert self.with_bbox, "Bbox head must be implemented."
         assert self.with_track, "Track head must be implemented"
 
-        import time
-        t0 = time.time()
+        # extract feature maps
+        x, feat_res0 = self.extract_feat(img)
 
-        x, feat_layer0 = self.extract_feat(img)
+        # save feature maps of key frame.
+        if key_frame:
+            self.key_feat_maps = x
+            self.key_feat_res0 = feat_res0
 
-        t1 = time.time()
-        # print("time cost from begin to feature map is: {}".format(t1 - t0))
+        feat_maps = list(x)
 
+        # get proposal list
         proposal_list = self.simple_test_rpn(
             x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
 
-        t2 = time.time()
-        # print("time cost from feature map to proposal list is: {}".format(t2 - t1))
-
+        # get bbox results
         det_bboxes, det_labels, det_obj_ids = self.simple_test_bboxes(
             x, img_meta, proposal_list, self.test_cfg.rcnn, rescale=rescale)
         bbox_results = bbox2result_with_id(det_bboxes, det_labels, det_obj_ids,
                                            self.bbox_head.num_classes)
 
-        t3 = time.time()
-        # print("time cost from begin to bbox and label is: {}".format(t3 - t2))
         if not self.with_mask:
             return bbox_results
         else:
-            segm_results = self.simple_test_mask(
-                x, img_meta, det_bboxes, det_labels,
-                rescale=rescale, det_obj_ids=det_obj_ids)
+            # get segmentation results using original net if current frame is key frame.
+            if key_frame:
+                segm_results = self.simple_test_mask(
+                    x, img_meta, det_bboxes, det_labels,
+                    rescale=rescale, det_obj_ids=det_obj_ids)
 
-            t4 = time.time()
-            # print("time cost from bbox to mask is: {}".format(t4 - t3))
+                return bbox_results, segm_results
 
-            print("time cost is: {}\t {}\t {}\t {}\t".format(t1 - t0, t2 - t1, t3 - t2, t4 - t3))
-            return bbox_results, segm_results, np.array([t1 - t0, t2 - t1, t3 - t2, t4 - t3])
+            # get segmentation results using flownet and feature warping
+            # if current frame is not key frame.
+            else:
+                # Turn feature maps to certain size.
+                # (b, c, 48, 64) for feature map and (b, c, 96, 128) for resnet-50 layer0 feature.
+                current_feat_map = self.resize(feat_maps[0])
+                key_feat_map = self.resize(self.key_feat_maps[0])
+                key_feat_res0 = self.resize(self.key_feat_res0, size=(96, 128))
+                key_feat_res0 = torch.cat((key_feat_res0, key_feat_res0), 1)  # channel from 64 to 128
+
+                # get flow results
+                flow_output = self.flow_head(current_feat_map, [key_feat_res0, key_feat_map])
+                # print("max flow:{}\t min flow:{}".format(torch.max(flow_output), torch.min(flow_output)))
+
+                # visualization
+                # rgb_flow = self.flow_head.flow2rgb(20 * flow_output[0], max_value=20)
+                # to_save = (rgb_flow * 255).astype(np.uint8).transpose(1,2,0)
+                # mmcv.imwrite(to_save, '/home/ubuntu/code/fengda/MaskTrackRCNN/flow.jpg')
+
+                # feature warping
+                current_feat_warped = warp(key_feat_map, flow_output)
+
+                # rescale feature map
+                feat_maps[0] = self.resize(current_feat_warped, size=x[0].shape[-2:])
+
+                # get segmentation results
+                segm_results = self.simple_test_mask(
+                    tuple(feat_maps), img_meta, det_bboxes, det_labels,
+                    rescale=rescale, det_obj_ids=det_obj_ids)
+                return bbox_results, segm_results
 
     def aug_test(self, imgs, img_metas, rescale=False):
         """Test with augmentations.
@@ -355,3 +394,9 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             return bbox_results, segm_results
         else:
             return bbox_results
+
+    @staticmethod
+    def resize(feat_map, size=(48, 64)):
+        """Resize feature map to certain size."""
+        key_feature = torch.nn.functional.interpolate(feat_map, size, mode='bilinear', align_corners=True)
+        return key_feature
