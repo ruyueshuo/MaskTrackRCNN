@@ -48,7 +48,14 @@ class RPNHead(AnchorHead):
                           scale_factor,
                           cfg,
                           rescale=False):
+        """get bboxes results for single image."""
+
+        # multi-level proposals.
         mlvl_proposals = []
+
+        # Select top 200(cfg.nms_pred) score results for each feature map and
+        # using NMS for further proposals selecting.
+        # Then cat proposals of each feature map to get multi-level proposals.
         for idx in range(len(cls_scores)):
             rpn_cls_score = cls_scores[idx]
             rpn_bbox_pred = bbox_preds[idx]
@@ -81,6 +88,7 @@ class RPNHead(AnchorHead):
             proposals = proposals[:cfg.nms_post, :]
             mlvl_proposals.append(proposals)
         proposals = torch.cat(mlvl_proposals, 0)
+
         if cfg.nms_across_levels:
             proposals, _ = nms(proposals, cfg.nms_thr)
             proposals = proposals[:cfg.max_num, :]
