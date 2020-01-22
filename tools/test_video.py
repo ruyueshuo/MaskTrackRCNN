@@ -14,11 +14,15 @@ from mmdet.models import build_detector, detectors
 def single_test(model, data_loader, show=False, save_path=''):
     model.eval()
     results = []
+    import numpy as np
+    avg_time = np.zeros((1, 4))
     dataset = data_loader.dataset
     prog_bar = mmcv.ProgressBar(len(dataset))
     for i, data in enumerate(data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, rescale=not show, **data)
+            result = model(return_loss=False, rescale=True, **data)
+            # avg_time += result[2]
+            # print(avg_time)
         results.append(result)
 
         if show:
@@ -41,10 +45,11 @@ def _data_func(data, device_id):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MMDet test detector')
-    parser.add_argument('config', help='test config file path')
-    parser.add_argument('checkpoint', help='checkpoint file')
+    parser.add_argument('--config', default="../configs/masktrack_rcnn_r50_fpn_1x_youtubevos.py",
+                        help='test config file path')
+    parser.add_argument('--checkpoint', default="../results/20191213-163326/epoch_16.pth", help='checkpoint file')
     parser.add_argument(
-        '--save_path', 
+        '--save_path', default="/home/ubuntu/datasets/YT-VIS/results/",
         type=str,
         help='path to save visual result')
     parser.add_argument(
@@ -55,34 +60,48 @@ def parse_args():
         type=int,
         help='Number of processes per GPU')
     parser.add_argument('--out', help='output result file')
-    parser.add_argument('--load_result', 
-        action='store_true', 
+    parser.add_argument('--load_result',
+                        default=None,
+                        # default="../results/20191213-113208/result_test.pkl",
+        # action='store_true',
         help='whether to load existing result')
     parser.add_argument(
         '--eval',
+        default=['bbox', 'segm'],
         type=str,
         nargs='+',
         choices=['bbox', 'segm'],
         help='eval types')
-    parser.add_argument('--show', action='store_true', help='show results')
+    # parser.add_argument('--show', action='store_true', help='show results')
+    parser.add_argument('--show', default=False, help='show results')
     args = parser.parse_args()
+
+    import os
+    args.save_path = os.path.dirname(args.checkpoint) + '/'
+
     return args
 
 
 def main():
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     args = parse_args()
-
+    args.out = args.save_path + 'result_test.pkl'
     if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
         raise ValueError('The output file must be a pkl file.')
 
     cfg = mmcv.Config.fromfile(args.config)
+
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
     cfg.model.pretrained = None
     cfg.data.test.test_mode = True
 
+    # get dataset
     dataset = obj_from_dict(cfg.data.test, datasets, dict(test_mode=True))
+
+    # build model
     assert args.gpus == 1
     model = build_detector(
         cfg.model, train_cfg=None, test_cfg=cfg.test_cfg)
@@ -98,7 +117,11 @@ def main():
         shuffle=False)
     if args.load_result:
         outputs = mmcv.load(args.out)
+        # import json
+        # with open(args.out+'.json', "w") as f:
+        #     json.dump(outputs, f)
     else:
+        # test
         outputs = single_test(model, data_loader, args.show, save_path=args.save_path)
 
     if args.out:
@@ -117,4 +140,7 @@ def main():
                 NotImplemented
 
 if __name__ == '__main__':
+    # from mmdet.models.mask_heads.res5_mask_head import ResMaskHead
+    # model = ResMaskHead()
+    # print(model)
     main()

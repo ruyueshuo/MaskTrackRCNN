@@ -9,17 +9,22 @@ import torch
 import torch.nn as nn
 from torch.nn.init import kaiming_normal_, constant_
 from .flow_utils import conv, predict_flow, deconv, crop_like, correlate
-
+from .correlation_package.correlation import Correlation
+from mmcv.runner import load_checkpoint
+from ..registry import HEADS
 __all__ = [
     'flownetc', 'flownetc_bn'
 ]
 
 
+@HEADS.register_module
 class FlowNetC(nn.Module):
     expansion = 1
 
-    def __init__(self,batchNorm=True):
+    def __init__(self, checkpoint=None, batchNorm=True):
         super(FlowNetC,self).__init__()
+        if checkpoint:
+            self.checkpoint = checkpoint
 
         self.batchNorm = batchNorm
         self.conv1      = conv(self.batchNorm,   3,   64, kernel_size=7, stride=2)
@@ -51,6 +56,11 @@ class FlowNetC(nn.Module):
         self.upsampled_flow4_to_3 = nn.ConvTranspose2d(2, 2, 4, 2, 1, bias=False)
         self.upsampled_flow3_to_2 = nn.ConvTranspose2d(2, 2, 4, 2, 1, bias=False)
 
+        # Correlation function in FlowNet2 by Nvidia.
+        # See https://github.com/NVIDIA/flownet2-pytorch for details.
+        self.corr = Correlation(pad_size=20, kernel_size=1, max_displacement=20, stride1=1, stride2=2, corr_multiply=1)
+        self.corr_activation = nn.LeakyReLU(0.1, inplace=True)
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
                 kaiming_normal_(m.weight, 0.1)
@@ -60,9 +70,13 @@ class FlowNetC(nn.Module):
                 constant_(m.weight, 1)
                 constant_(m.bias, 0)
 
-    def forward(self, x, out_conv2a):
-        x1 = x[:,:3]
-        x2 = x[:,3:]
+    def init_weights(self):
+        """load checkpoint."""
+        load_checkpoint(self, self.checkpoint)
+
+    def forward(self, x1, x2):
+        # x1 = x[:,:3]
+        # x2 = x[:,3:]
 
         out_conv1a = self.conv1(x1)
         out_conv2a = self.conv2(out_conv1a)
@@ -73,7 +87,9 @@ class FlowNetC(nn.Module):
         out_conv3b = self.conv3(out_conv2b)
 
         out_conv_redir = self.conv_redir(out_conv3a)
-        out_correlation = correlate(out_conv3a,out_conv3b)
+        # out_correlation = correlate(out_conv3a,out_conv3b)
+        out_corr = self.corr(out_conv3a, out_conv3b)  # False
+        out_correlation = self.corr_activation(out_corr)
 
         in_conv3_1 = torch.cat([out_conv_redir, out_correlation], dim=1)
 
@@ -105,8 +121,10 @@ class FlowNetC(nn.Module):
         flow2 = self.predict_flow2(concat2)
 
         if self.training:
+            torch.cuda.empty_cache()
             return flow2,flow3,flow4,flow5,flow6
         else:
+            torch.cuda.empty_cache()
             return flow2
 
     def weight_parameters(self):

@@ -11,7 +11,20 @@ from mmdet.core import bbox_overlaps, bbox2result_with_id
 @DETECTORS.register_module
 class TwoStageDetector(BaseDetector, RPNTestMixin,
                        MaskTestMixin):
+    """
 
+    :param backbone: ConfigDict,采用的backbone网络结构
+    :param neck: ConfigDict,采用的neck网络结构
+    :param rpn_head: ConfigDict,采用的rep_head网络结构
+    :param bbox_roi_extractor: ConfigDict,采用的bbox_roi_extractor网络结构
+    :param bbox_head: ConfigDict,采用的bbox_head网络结构
+    :param track_head: ConfigDict,采用的track_head网络结构
+    :param mask_roi_extractor: ConfigDict,采用的mask_roi_extractor网络结构
+    :param mask_head: ConfigDict,采用的mask_head网络结构
+    :param train_cfg: ConfigDict, 训练配置参数
+    :param test_cfg: ConfigDict, 测试配置参数
+    :param pretrained: str, e.g.: 'modelzoo://resnet50'
+    """
     def __init__(self,
                  backbone,
                  neck=None,
@@ -48,6 +61,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
 
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+
         # memory queue for testing
         self.prev_bboxes = None
         self.prev_roi_feats = None
@@ -58,6 +72,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
         return hasattr(self, 'rpn_head') and self.rpn_head is not None
 
     def init_weights(self, pretrained=None):
+        """initialize weights."""
         super(TwoStageDetector, self).init_weights(pretrained)
         self.backbone.init_weights(pretrained=pretrained)
         if self.with_neck:
@@ -78,9 +93,14 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             self.track_head.init_weights()
     
     def extract_feat(self, img):
+        """extract feature map with backbone and neck."""
         x = self.backbone(img)
+        # for xx in x:
+        #     print('size of x after backbone:{}'.format(xx.shape))
         if self.with_neck:
             x = self.neck(x)
+            # for xx in x:
+            #     print('size of x after neck:{}'.format(xx.shape))
         return x
 
     def forward_train(self,
@@ -94,8 +114,11 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
                       gt_pids, # gt ids of current frame bbox mapped to reference frame
                       gt_masks=None,
                       proposals=None):
+        # extract feature
+        # print('size of img:{}'.format(img.shape))
         x = self.extract_feat(img)
         ref_x = self.extract_feat(ref_img)
+        # print('size of x:{}'.format(x.size()))
         losses = dict()
         
         # RPN forward and loss
@@ -154,6 +177,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             loss_match = self.track_head.loss(match_score,
                                               ids, id_weights)
             losses.update(loss_match)
+
         # mask head forward and loss
         if self.with_mask:
             pos_rois = bbox2roi([res.pos_bboxes for res in sampling_results])
@@ -267,22 +291,40 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
         """Test without augmentation."""
         assert self.with_bbox, "Bbox head must be implemented."
         assert self.with_track, "Track head must be implemented"
+
+        import time
+        t0 = time.time()
+
         x = self.extract_feat(img)
-        
+
+        t1 = time.time()
+        # print("time cost from begin to feature map is: {}".format(t1 - t0))
+
         proposal_list = self.simple_test_rpn(
             x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
+
+        t2 = time.time()
+        # print("time cost from feature map to proposal list is: {}".format(t2 - t1))
 
         det_bboxes, det_labels, det_obj_ids = self.simple_test_bboxes(
             x, img_meta, proposal_list, self.test_cfg.rcnn, rescale=rescale)
         bbox_results = bbox2result_with_id(det_bboxes, det_labels, det_obj_ids,
                                    self.bbox_head.num_classes)
 
+        t3 = time.time()
+        # print("time cost from begin to bbox and label is: {}".format(t3 - t2))
         if not self.with_mask:
             return bbox_results
         else:
             segm_results = self.simple_test_mask(
                 x, img_meta, det_bboxes, det_labels, 
                 rescale=rescale, det_obj_ids=det_obj_ids)
+
+            t4 = time.time()
+            # print("time cost from bbox to mask is: {}".format(t4 - t3))
+
+            # print("time cost is: {}\t {}\t {}\t {}\t".format(t1 - t0, t2 - t1, t3 - t2, t4 - t3))
+            # return bbox_results, segm_results, np.array([t1 - t0, t2 - t1, t3 - t2, t4 - t3])
             return bbox_results, segm_results
 
     def aug_test(self, imgs, img_metas, rescale=False):

@@ -239,6 +239,7 @@ class YTVOSDataset(CustomDataset):
         img_scale = random_scale(self.img_scales)  # sample a scale
         img, img_shape, pad_shape, scale_factor = self.img_transform(
             img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
+        scale_factor = tuple(scale_factor)
         img = img.copy()
         ref_img, ref_img_shape, _, ref_scale_factor = self.img_transform(
             ref_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
@@ -258,8 +259,11 @@ class YTVOSDataset(CustomDataset):
             gt_bboxes_ignore = self.bbox_transform(gt_bboxes_ignore, img_shape,
                                                    scale_factor, flip)
         if self.with_mask:
+            if isinstance(scale_factor, tuple):
+                h, w = img_shape[0], img_shape[1]
+                _scale_factor = tuple([w, h, w, h])
             gt_masks = self.mask_transform(ann['masks'], pad_shape,
-                                           scale_factor, flip)
+                                           _scale_factor, flip)
 
         ori_shape = (vid_info['height'], vid_info['width'], 3)
         img_meta = dict(

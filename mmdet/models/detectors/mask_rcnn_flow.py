@@ -1,9 +1,9 @@
-from .two_stage_flow import TwoStageDetectorFlow
+from .two_stage_flow_test import TwoStageDetectorFlowTest
 from ..registry import DETECTORS
 
 
 @DETECTORS.register_module
-class MaskRCNNFlow(TwoStageDetectorFlow):
+class MaskRCNNFlow(TwoStageDetectorFlowTest):
 
     def __init__(self,
                  backbone,

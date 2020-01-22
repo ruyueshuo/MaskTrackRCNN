@@ -1,6 +1,6 @@
 # model settings
 model = dict(
-    type='MaskRCNN',
+    type='MaskRCNNFlow',
     pretrained='modelzoo://resnet50',
     backbone=dict(
         type='ResNetFlow',
@@ -52,18 +52,22 @@ model = dict(
         roi_layer=dict(type='RoIAlign', out_size=14, sample_num=2),
         out_channels=256,
         featmap_strides=[4, 8, 16, 32]),
+    mask_head=dict(
+        type='FCNMaskHead',
+        num_convs=4,
+        in_channels=256,
+        conv_out_channels=256,
+        num_classes=41),
     # mask_head=dict(
-    #     type='FCNMaskHead',
+    #     type='ResMaskHead',
     #     num_convs=4,
     #     in_channels=256,
     #     conv_out_channels=256,
     #     num_classes=41),
-    mask_head=dict(
-        type='ResMaskHead',
-        num_convs=4,
-        in_channels=256,
-        conv_out_channels=256,
-        num_classes=41)
+    flow_head=dict(
+        type='FlowNetC',
+        checkpoint="../pretrained_models/flownetc_EPE1.766.tar"
+    )
 )
 # model training and testing settings
 train_cfg = dict(
@@ -116,6 +120,7 @@ test_cfg = dict(
 # dataset settings
 dataset_type = 'YTVOSDataset'
 data_root = '/home/ubuntu/datasets/YT-VIS/'
+# data_root = '/home/ubuntu/datasets/YT-VIS/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 data = dict(
@@ -125,7 +130,7 @@ data = dict(
         type=dataset_type,
         ann_file=data_root + 'annotations/instances_train_sub.json',
         img_prefix=data_root + 'train/JPEGImages',
-        img_scale=[(320, 180), (640, 360)],
+        img_scale=[(640, 360)],
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
         flip_ratio=0.5,
@@ -144,7 +149,8 @@ data = dict(
         with_mask=True,
         with_crowd=True,
         with_label=True,
-        with_track=True),
+        with_track=True,
+        resize_keep_ratio=False),
     test=dict(
         type=dataset_type,
         ann_file=data_root + 'annotations/instances_val_sub.json',

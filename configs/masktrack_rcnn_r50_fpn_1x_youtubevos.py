@@ -52,12 +52,19 @@ model = dict(
         roi_layer=dict(type='RoIAlign', out_size=14, sample_num=2),
         out_channels=256,
         featmap_strides=[4, 8, 16, 32]),
+    # mask_head=dict(
+    #     type='FCNMaskHead',
+    #     num_convs=4,
+    #     in_channels=256,
+    #     conv_out_channels=256,
+    #     num_classes=41),
     mask_head=dict(
-        type='FCNMaskHead',
+        type='ResMaskHead',
         num_convs=4,
         in_channels=256,
         conv_out_channels=256,
-        num_classes=41))
+        num_classes=41)
+)
 # model training and testing settings
 train_cfg = dict(
     rpn=dict(
@@ -108,7 +115,7 @@ test_cfg = dict(
         mask_thr_binary=0.5))
 # dataset settings
 dataset_type = 'YTVOSDataset'
-data_root = 'data/'
+data_root = '/home/ubuntu/datasets/YT-VIS/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 data = dict(
@@ -118,7 +125,7 @@ data = dict(
         type=dataset_type,
         ann_file=data_root + 'annotations/instances_train_sub.json',
         img_prefix=data_root + 'train/JPEGImages',
-        img_scale=(640, 360),
+        img_scale=[(320, 180), (640, 360)],
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
         flip_ratio=0.5,
@@ -170,7 +177,7 @@ log_config = dict(
     ])
 # yapf:enable
 # runtime settings
-total_epochs = 12
+total_epochs = 16
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = './work_dirs/masktrack_rcnn_r50_fpn_1x_youtubevos'

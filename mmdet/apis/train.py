@@ -14,7 +14,14 @@ from .env import get_root_logger
 
 
 def parse_losses(losses):
+    """
+    对（bbox, track, mask）三部分先各自取平均（batch）,再求和得到loss.
+    :param losses: Dict, including bbox loss, track loss and mask loss.
+    :return: loss: Tensor; log_vars: Dict.
+    """
     log_vars = OrderedDict()
+
+    # 对每个部分求平均
     for loss_name, loss_value in losses.items():
         if isinstance(loss_value, torch.Tensor):
             log_vars[loss_name] = loss_value.mean()
@@ -24,6 +31,7 @@ def parse_losses(losses):
             raise TypeError(
                 '{} is not a tensor or list of tensors'.format(loss_name))
 
+    # 对每个部分求和
     loss = sum(_value for _key, _value in log_vars.items() if 'loss' in _key)
 
     log_vars['loss'] = loss
@@ -106,16 +114,21 @@ def _non_dist_train(model, dataset, cfg, validate=False):
             cfg.gpus,
             dist=False)
     ]
+
     # put model on gpus
     model = MMDataParallel(model, device_ids=range(cfg.gpus)).cuda()
+
     # build runner
     runner = Runner(model, batch_processor, cfg.optimizer, cfg.work_dir,
                     cfg.log_level)
     runner.register_training_hooks(cfg.lr_config, cfg.optimizer_config,
                                    cfg.checkpoint_config, cfg.log_config)
 
+    # load_checkpoint
     if cfg.resume_from:
         runner.resume(cfg.resume_from)
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
+
+    # training
     runner.run(data_loaders, cfg.workflow, cfg.total_epochs)

@@ -37,10 +37,12 @@ class PolicyNet(nn.Module):
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.avgpool = nn.AvgPool2d(7, stride=1)
 
-        self.fc1 = nn.Linear(512, 2048)
+        self.fc1 = nn.Linear(3840, 2048)
         self.fc2 = nn.Linear(2048, 512)
         self.fc3 = nn.Linear(512, 128)
-        self.fc4 = nn.Linear(128, num_outputs)
+        self.fc4 = nn.Linear(128+6, num_outputs)
+
+        self.sigmoid = nn.Sigmoid()
 
         self.checkpoint = checkpoint
 
@@ -54,8 +56,14 @@ class PolicyNet(nn.Module):
                 nn.init.xavier_uniform_(_module.weight)
                 nn.init.constant_(_module.bias, 0)
 
-    def forward(self, x, y):
+    def forward(self, inputs):
         """mu, sigma_sq?"""
+        feat_diff = inputs[0].cuda()
+        feat_self = inputs[1].cuda()
+        feat_FAR = torch.tensor(inputs[2]).cuda().float().reshape((-1, 1))
+        feat_history = inputs[3].reshape(-1, 5)
+        x = torch.cat((feat_diff, feat_self), 1)
+        y = torch.cat((feat_FAR, feat_history), 1)
         x = self.conv(x)
         x = self.bn(x)
         x = self.relu(x)
@@ -64,8 +72,9 @@ class PolicyNet(nn.Module):
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
         x = self.relu(self.fc3(x))
-        x = torch.cat((x, y), 0)
-        x = self.relu(self.fc(x))
+        x = torch.cat((x, y), 1)
+        x = self.sigmoid(self.fc4(x))
+        # x = self.softmax(x)
         # x = self.conv(x)
         # x = nn.Relu(self.linear1(x))
         # mu = self.linear2(x)
@@ -161,25 +170,30 @@ class REINFORCE(object):
         self.model.train()
 
     def select_action(self, state):
-        mu, sigma_sq = self.model(state.cuda())
-        sigma_sq = nn.functional.softplus(sigma_sq)
+        a_prob = self.model(state)
+        a = torch.argmax(a_prob)
+        return a, a_prob
 
-        eps = torch.randn(mu.size())
-        # calculate the probability
-        action = (mu + sigma_sq.sqrt() * (eps).cuda()).data
-        prob = self.normal(action, mu, sigma_sq)
-        entropy = -0.5 * ((sigma_sq + 2 * pi.expand_as(sigma_sq)).log() + 1)
-
-        log_prob = prob.log()
-        return action, log_prob, entropy
-
+    # def select_action(self, state):
+    #     mu, sigma_sq = self.model(state.cuda())
+    #     sigma_sq = nn.functional.softplus(sigma_sq)
+    #
+    #     eps = torch.randn(mu.size())
+    #     # calculate the probability
+    #     action = (mu + sigma_sq.sqrt() * (eps).cuda()).data
+    #     prob = self.normal(action, mu, sigma_sq)
+    #     entropy = -0.5 * ((sigma_sq + 2 * pi.expand_as(sigma_sq)).log() + 1)
+    #
+    #     log_prob = prob.log()
+    #     return action, log_prob, entropy
     def update_parameters(self, rewards, log_probs, entropies, gamma):
         R = torch.zeros(1, 1)
         loss = 0
         for i in reversed(range(len(rewards))):
             R = gamma * R + rewards[i]
-            loss = loss - (log_probs[i] * ((R).expand_as(log_probs[i])).cuda()).sum() - (
-                        0.0001 * entropies[i].cuda()).sum()
+            # loss = loss - (log_probs[i] * ((R).expand_as(log_probs[i])).cuda()).sum() - (
+            #             0.0001 * entropies[i].cuda()).sum()
+        loss = R
         loss = loss / len(rewards)
 
         self.optimizer.zero_grad()

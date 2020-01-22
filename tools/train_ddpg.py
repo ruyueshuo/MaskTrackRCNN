@@ -94,6 +94,7 @@ def parser_args():
 
 
 if __name__ == '__main__':
+    # CUDA_LAUNCH_BLOCKING = 1
     args = parser_args()
 
     # config
@@ -106,6 +107,9 @@ if __name__ == '__main__':
     model = build_detector(
         cfg.model, train_cfg=cfg.train_cfg, test_cfg=cfg.test_cfg)
     load_checkpoint(model, args.checkpoint)
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+    torch.backends.cudnn.enabled = False
+    os.environ['CUDA_ENABLE_DEVICES'] = '0'
     device = torch.device("cuda")
     model.to(device)
     # model = MMDataParallel(model, device_ids=[0])
@@ -137,7 +141,7 @@ if __name__ == '__main__':
     input_dim = 512
     action_dim = 1
     q_dim = 1
-    batch_size = 128
+    batch_size = 8
     hidden_units = 256
     gamma = 0.98  # Discount Factor for future rewards
     num_epochs = 50
