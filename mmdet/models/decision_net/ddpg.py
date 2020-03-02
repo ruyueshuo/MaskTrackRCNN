@@ -6,14 +6,18 @@
 # @Software: PyCharm
 
 # This script contains the Actor and Critic classes
-import torch.nn as nn
 import math
 import torch
 import numpy as np
-from .utils import OrnsteinUhlenbeckActionNoise
-from torch.autograd import Variable
-from .memory import ReplayBuffer, Transition
+
 import torch.optim as opt
+import torch.nn as nn
+from torch.autograd import Variable
+import torch.nn.functional as F
+
+from .noise import OrnsteinUhlenbeckActionNoise, GaussianActionNoise
+from .memory import ReplayBuffer, Transition
+
 from mmcv.runner import load_checkpoint
 
 
@@ -22,16 +26,16 @@ class DDPG(object):
     The Deep Deterministic policy gradient network
     """
 
-    def __init__(self, num_hidden_units, input_dim, num_actions, num_q_val,
-                 observation_dim, goal_dim,
-                 batch_size, use_cuda, gamma, random_seed,
-                 actor_optimizer, critic_optimizer,
-                 actor_learning_rate, critic_learning_rate,
-                 loss_function, polyak_constant,
-                 buffer_capacity, non_conv=False,
+    def __init__(self, num_hidden_units=128, input_dim=512, num_actions=1, num_q_val=1,
+                 observation_dim=None, goal_dim=None,
+                 batch_size=8, use_cuda=False, gamma=0.99, random_seed=41,
+                 actor_optimizer=opt.Adam, critic_optimizer=opt,
+                 actor_learning_rate=0.001, critic_learning_rate=0.001,
+                 loss_function=F.smooth_l1_loss, polyak_constant=0.05,
+                 buffer_capacity=1000, non_conv=False,
                  num_conv_layers=None, num_pool_layers=None,
                  conv_kernel_size=None, img_height=None, img_width=None,
-                 input_channels=None, check_point=None):
+                 input_channels=None, a_check_point=None, c_check_point=None):
 
         self.num_hidden_units = num_hidden_units
         self.non_conv = non_conv
@@ -51,7 +55,8 @@ class DDPG(object):
         self.criterion = loss_function
         self.tau = polyak_constant
         self.buffer = ReplayBuffer(capacity=buffer_capacity, seed=random_seed)
-        self.check_point = check_point
+        self.a_check_point = a_check_point
+        self.c_check_point = c_check_point
 
         # Convolution Parameters
         self.num_conv = num_conv_layers
@@ -61,10 +66,11 @@ class DDPG(object):
         self.conv_kernel_size = conv_kernel_size
         self.input_channels = input_channels
 
-        self.target_actor = ActorNet(input_dim, num_actions, check_point)
-        self.actor = ActorNet(input_dim, num_actions, check_point)
-        self.target_critic = CriticNet(input_dim, num_q_val, check_point)
-        self.critic = CriticNet(input_dim, num_q_val, check_point)
+        # Actor & Critic Net Initialization.
+        self.target_actor = ActorNet(input_dim, num_actions, a_check_point)
+        self.actor = ActorNet(input_dim, num_actions, a_check_point)
+        self.target_critic = CriticNet(input_dim, num_q_val, c_check_point)
+        self.critic = CriticNet(input_dim, num_q_val, c_check_point)
 
         if self.cuda:
             self.to_cuda()
@@ -81,7 +87,10 @@ class DDPG(object):
         self.critic_optim = opt.Adam(critic_parameters, lr=self.critic_lr)
 
         # Initialize a random exploration noise
-        self.random_noise = OrnsteinUhlenbeckActionNoise(self.num_actions)
+        # self.random_noise = ](self.num_actions)
+        self.random_noise = GaussianActionNoise(self.num_actions)
+
+        self.idx = 0
 
     def to_cuda(self):
         self.target_actor = self.target_actor.cuda()
@@ -149,12 +158,15 @@ class DDPG(object):
 
     # Store the transition into the replay buffer
     def store_transition(self, state, new_state, action, reward, done):
-        self.buffer.push(state, action, new_state, reward, done)
+        self.buffer.push_hd(state, action, new_state, reward, done)
 
     # Update the target networks using polyak averaging
     def update_target_networks(self):
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(self.tau * param.data + target_param.data * (1.0 - self.tau))
+        self.idx += 1
+        if self.idx % 5 == 0:
+            self.idx = 0
+            for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+                target_param.data.copy_(self.tau * param.data + target_param.data * (1.0 - self.tau))
 
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(self.tau * param.data + target_param.data * (1.0 - self.tau))
@@ -204,7 +216,7 @@ class DDPG(object):
         if self.buffer.get_buffer_size() < self.batch_size:
             return None, None
 
-        transitions = self.buffer.sample_batch(self.batch_size)
+        transitions = self.buffer.sample_batch_hd(self.batch_size)
         batch = Transition(*zip(*transitions))
 
         def batch_state(batch):
@@ -235,15 +247,18 @@ class DDPG(object):
         #with torch.no_grad():
 
         new_action = self.target_actor(new_states)
-        new_action.volatile = True
-        next_Q_values = self.target_critic(new_states, new_action)
+        # new_action.volatile = True
+        with torch.no_grad():
+            next_Q_values = self.target_critic(new_states, new_action)
         # Find the Q-value for the action according to the target actior network
         # We do this because calculating max over a continuous action space is intractable
         # next_Q_values.volatile = False
-        next_Q_values = torch.squeeze(next_Q_values, dim=1)
+        # next_Q_values = torch.squeeze(next_Q_values, dim=1)
+        # dones = torch.squeeze(dones, dim=1)
         next_Q_values = next_Q_values * (1 - dones)
-        next_Q_values.volatile = False
-        y = rewards + self.gamma*next_Q_values
+        # next_Q_values.volatile = False
+        with torch.no_grad():
+            y = rewards + self.gamma*next_Q_values
 
         # Zero the optimizer gradients
         self.actor_optim.zero_grad()
@@ -255,16 +270,18 @@ class DDPG(object):
         loss.backward(retain_graph=True)
         # Clamp the gradients to avoid vanishing gradient problem
         for param in self.critic.parameters():
-            param.grad.data.clamp_(-1, 1)
+            if param.grad is not None:
+                param.grad.data.clamp_(-1, 1)
         self.critic_optim.step()
 
         # Updating the actor policy
-        policy_loss = -1 * self.critic(states, self.actor(states))
+        policy_loss = -1 * self.critic(states, self.actor(states))  # TODO 没搞明白？Q的负数作为loss?
         policy_loss = policy_loss.mean()
         policy_loss.backward(retain_graph=True)
         # Clamp the gradients to avoid the vanishing gradient problem
         for param in self.actor.parameters():
-            param.grad.data.clamp_(-1, 1)
+            if param.grad is not None:
+                param.grad.data.clamp_(-1, 1)
         self.actor_optim.step()
 
         return loss, policy_loss
@@ -283,23 +300,36 @@ class ActorNet(nn.Module):
     def __init__(self,
                  input_channel,
                  num_outputs,
-                 checkpoint=None):
+                 checkpoint=None,
+                 is_training=True):
 
         super(ActorNet, self).__init__()
 
-        self.conv = nn.Conv2d(input_channel, 128, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn = nn.BatchNorm2d(128)
-        self.relu = nn.ReLU(inplace=True)
+        self.conv1 = nn.Conv2d(input_channel, 512, kernel_size=3, stride=2, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(512)
+        # self.conv2 = nn.Conv2d(128, 64, kernel_size=3, stride=2, padding=1, bias=False)
+        # self.bn2 = nn.BatchNorm2d(64)
+
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.avgpool = nn.AvgPool2d(7, stride=1)
 
-        self.fc1 = nn.Linear(7680, 1024)
-        self.fc2 = nn.Linear(1024, 256)
+        self.fc1 = nn.Linear(7680*4, 1024*2)
+        self.fc2 = nn.Linear(1024*2, 256)
         self.fc3 = nn.Linear(256, 64)
-        self.fc4 = nn.Linear(64+6, num_outputs)
+        self.fc4 = nn.Linear(64+11, num_outputs)
 
+        # self.bn_fc1 = nn.BatchNorm1d(1024*2)
+        # self.bn_fc2 = nn.BatchNorm1d(256)
+        # self.bn_fc3 = nn.BatchNorm1d(64)
+
+        # Activation functions
+        self.relu = nn.ReLU(inplace=True)
+        self.leakyrelu = nn.LeakyReLU(negative_slope=0.01, inplace=True)
         self.sigmoid = nn.Sigmoid()
+        self.tanh = nn.Tanh()
+        self.activation = self.leakyrelu
 
+        self.is_training = is_training
         self.checkpoint = checkpoint
         self.init_weights()
 
@@ -309,33 +339,65 @@ class ActorNet(nn.Module):
             """load checkpoint."""
             load_checkpoint(self, self.checkpoint)
         else:
-            for _module in [self.conv, self.fc1, self.fc2, self.fc3, self.fc4]:
-                nn.init.xavier_uniform_(_module.weight)
-                if _module not in [self.conv]:
-                    # _module.bias.fill_(0.01)
-                    nn.init.constant_(_module.bias, 0)
+            for m in self.children():
+                if isinstance(m, nn.Conv2d):
+                    if isinstance(self.activation, (nn.ReLU, nn.LeakyReLU)):
+                        nn.init.kaiming_normal_(m.weight, mode='fan_in')
+                    elif isinstance(self.activation, nn.Sigmoid):
+                        nn.init.xavier_uniform_(m.weight)
+                    else:
+                        n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                        m.weight.data.normal_(0, math.sqrt(2. / n))
+
+                elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                    m.weight.data.fill_(1)
+                    m.bias.data.zero_()
+
+                elif isinstance(m, nn.Linear):
+                    nn.init.kaiming_normal_(m.weight)
+                    # nn.init.xavier_uniform_(m.weight)
+
+            # for _module in [self.conv1, self.conv2, self.fc1, self.fc2, self.fc3, self.fc4]:
+            #     if self.activation in [self.relu, self.leakyrelu]:
+            #         nn.init.kaiming_normal_(_module.weight, mode='fan_in')
+            #     else:
+            #         nn.init.xavier_uniform_(_module.weight)
+            #
+            #     elif isinstance(_module, nn.BatchNorm2d):
+            #         _module.weight.data.fill_(1)
+            #         _module.bias.data.zero_()
+                # if _module not in [self.conv1, self.conv2]:
+                #     # _module.bias.fill_(0.01)
+                #     nn.init.constant_(_module.bias, 0)
 
     def forward(self, inputs):
         """mu, sigma_sq?"""
-        feat_diff = inputs[0]
-        feat_self = inputs[1]
-        feat_FAR = torch.tensor(inputs[2]).float().reshape((-1, 1))
-        feat_history = inputs[3].reshape(-1, 5)
-        x = torch.cat((feat_diff, feat_self), 1)
+        # feat_diff = inputs[0]
+        # feat_self = inputs[1]
+        feat_FAR = inputs[2].clone().detach().reshape((-1, 1))
+        feat_history = inputs[3].reshape(-1, 10)
+        x = torch.cat((inputs[0], inputs[1]), 1)
         y = torch.cat((feat_FAR, feat_history), 1)
-        x = self.conv(x)
-        x = self.bn(x)
-        x = self.relu(x)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        # if self.is_training:
+        #     x = self.bn1(x)
+        x = self.activation(x)
+        # x = self.conv2(x)
+        # if self.is_training:
+        #     x = self.bn2(x)
+        # x = self.relu(x)
         x = self.maxpool(x)
         x = x.view(x.size(0), -1)
         try:
-            x = self.relu(self.fc1(x))
+            x = self.activation(self.fc1(x))
         except RuntimeError as e:
-            print("x.shape:{}\tfeat_self.shape:{}".format(x.shape, feat_self.shape))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.fc3(x))
+            print("x.shape:{}\tfeat_self.shape:{}".format(x.shape, inputs[1].shape))
+        x = self.activation(self.fc2(x))
+        x = self.activation(self.fc3(x))
         x = torch.cat((x, y), 1)
-        x = self.sigmoid(self.fc4(x))
+        x = self.fc4(x)
+        x = self.sigmoid(x)
         # x = self.softmax(x)
 
         return x
@@ -348,23 +410,30 @@ class CriticNet(nn.Module):
     def __init__(self,
                  input_channel,
                  num_outputs,
-                 checkpoint=None):
+                 checkpoint=None,
+                 is_training=False):
 
         super(CriticNet, self).__init__()
 
         self.conv = nn.Conv2d(input_channel, 128, kernel_size=3, stride=2, padding=1, bias=False)
         self.bn = nn.BatchNorm2d(128)
-        self.relu = nn.ReLU(inplace=True)
+
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.avgpool = nn.AvgPool2d(7, stride=1)
 
         self.fc1 = nn.Linear(7680, 1024)
         self.fc2 = nn.Linear(1024, 256)
         self.fc3 = nn.Linear(256, 64)
-        self.fc4 = nn.Linear(64+7, num_outputs)
+        self.fc4 = nn.Linear(64+15, num_outputs)
 
+        self.bn_fc1 = nn.BatchNorm1d(1024)
+        # self.bn_fc2 = nn.BatchNorm1d(256)
+        # self.bn_fc3 = nn.BatchNorm1d(64)
+
+        self.relu = nn.ReLU(inplace=True)
         self.sigmoid = nn.Sigmoid()
-
+        self.activation = self.relu
+        self.is_training = is_training
         self.checkpoint = checkpoint
         self.init_weights()
 
@@ -374,28 +443,45 @@ class CriticNet(nn.Module):
             """load checkpoint."""
             load_checkpoint(self, self.checkpoint)
         else:
-            for _module in [self.conv, self.fc1, self.fc2, self.fc3, self.fc4]:
-                nn.init.xavier_uniform_(_module.weight)
-                if _module not in [self.conv]:
-                    # _module.bias.fill_(0.01)
-                    nn.init.constant_(_module.bias, 0)
+            for m in self.children():
+                if isinstance(m, nn.Conv2d):
+                    if isinstance(self.activation, (nn.ReLU, nn.LeakyReLU)):
+                        nn.init.kaiming_normal_(m.weight, mode='fan_in')
+                    elif isinstance(self.activation, nn.Sigmoid):
+                        nn.init.xavier_uniform_(m.weight)
+                    else:
+                        n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                        m.weight.data.normal_(0, math.sqrt(2. / n))
+
+                elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                    m.weight.data.fill_(1)
+                    m.bias.data.zero_()
+
+                elif isinstance(m, nn.Linear):
+                    nn.init.kaiming_normal_(m.weight)
+            # for _module in [self.conv, self.fc1, self.fc2, self.fc3, self.fc4]:
+            #     nn.init.xavier_uniform_(_module.weight)
+            #     if _module not in [self.conv]:
+            #         # _module.bias.fill_(0.01)
+            #         nn.init.constant_(_module.bias, 0)
 
     def forward(self, state, action):
         """mu, sigma_sq?"""
-        feat_diff = state[0]
-        feat_self = state[1]
-        feat_FAR = torch.tensor(state[2]).float().reshape((-1, 1))
-        feat_history = state[3].reshape(-1, 5)
-        x = torch.cat((feat_diff, feat_self), 1)
+        # feat_diff = state[0]
+        # feat_self = state[1]
+        feat_FAR = state[2].clone().detach().float().reshape((-1, 1))
+        feat_history = state[3].reshape(-1, 10)
+        x = torch.cat((state[0], state[1]), 1)
         y = torch.cat((feat_FAR, feat_history), 1)
         x = self.conv(x)
-        x = self.bn(x)
+        if self.is_training:
+            x = self.bn(x)
         x = self.relu(x)
         x = self.maxpool(x)
         x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.fc3(x))
+        x = self.activation(self.fc1(x))
+        x = self.activation(self.fc2(x))
+        x = self.activation(self.fc3(x))
         # add action
         x = torch.cat((x, y, action), 1)
         x = self.fc4(x)

@@ -6,81 +6,55 @@
 # @Software: PyCharm
 import os
 import random
+import traceback
 import json
 from queue import Queue
 import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.models as models
+import copy
 
+import cv2
 from mmdet import datasets
 import mmcv
 from mmcv.runner import load_checkpoint, parallel_test, obj_from_dict
 from mmdet.datasets import get_dataset
 from mmdet.datasets import build_dataloader
 from .memory import ReplayMemory
-
+from .utils import *
 from pycocotools.ytvos import YTVOS
 from pycocotools.ytvoseval import YTVOSeval
 
 
-def modify_cfg(cfg, video_name):
-    cfg_test = cfg.data.val
-    cfg_test.ann_file = cfg.data_root + 'train/Annotations/{}/{}_annotations.json'.format(video_name, video_name)
-    cfg_test.img_prefix = cfg.data_root + 'train/JPEGImages/'
-    return cfg_test
-
-
-def get_dataloader(dataset):
-    # dataset = obj_from_dict(cfg, datasets, dict(test_mode=True))
-    data_loader = build_dataloader(
-        dataset,
-        imgs_per_gpu=1,
-        workers_per_gpu=0,
-        num_gpus=1,
-        dist=False)
-        # shuffle=False)
-    return data_loader
-
-
-def get_VIS_data(loader, index):
-    for i, data in enumerate(loader):
-        if i == index:
-            # TODO DC objects to GPU tensor.
-            data['img'] = data['img'].data[0].cuda()
-            data['ref_img'] = data['ref_img'].data[0].cuda()
-            data['img_meta'] = data['img_meta'].data[0]
-            data['gt_bboxes'] = data['gt_bboxes'].data[0]
-            data['ref_bboxes'] = data['ref_bboxes'].data[0]
-            data['gt_labels'] = data['gt_labels'].data[0]
-            data['gt_pids'] = data['gt_pids'].data[0]
-            data['gt_bboxes_ignore'] = data['gt_bboxes_ignore'].data[0]
-            data['gt_masks'] = data['gt_masks'].data[0]
-
-            data['gt_bboxes'][0] = data['gt_bboxes'][0].cuda()
-            data['ref_bboxes'][0] = data['ref_bboxes'][0].cuda()
-            data['gt_labels'][0] = data['gt_labels'][0].cuda()
-            data['gt_pids'][0] = data['gt_pids'][0].cuda()
-            data['gt_bboxes_ignore'][0] = data['gt_bboxes_ignore'][0].cuda()
-            return data
-
-    raise LookupError
-
-
 class DecisionEnv(object):
-    """env for decision."""
+    """Env for decision."""
 
     def __init__(self,
                  model,
                  cfg,
-                 ):
+                 videos=None,
+                 res_model=None,
+                 is_train=True):
 
         self.model = model  # task model
         self.cfg = cfg  # config
+        if videos:
+            self.videos = videos  # video list
+        else:
+            data_path = cfg['data_root'] + 'train/Annotations'
+            self.videos = os.listdir(data_path)  # video names
+        self.videos.sort()
+        self.is_train = is_train  # train or validation
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        if res_model is None:
+            self.res_model = models.resnet50(pretrained=True).to(self.device)
+        else:
+            self.res_model = res_model
 
         self.state = None
         self.rewards = None
-        self.idx_frame = None    # frame index of the episode.
+        self.idx_frame = None  # frame index of the episode.
         self.start_frame = None  # first frame index of the original video
         self.done = None
 
@@ -100,62 +74,61 @@ class DecisionEnv(object):
         # self.current_low_feat = None
         self.data_current_full = None
         self.data_current_low = None
+        self.data_current_a = None
 
         self.cfg_test = None
         self.video_annotation = None
 
-        data_path = cfg['data_root'] + 'train/Annotations'
-        self.videos = os.listdir(data_path)  # video names
-        self.videos.sort()
         self.actions = [1, 1/2, 1/3, 1/4]
-
-        self.device = torch.device("cuda")
+        self.speed_rewards = [0.1, 0.2, 0.3, 0.4]
+        # self.device = torch.device("cuda")
+        self.FAR_thr = torch.tensor([0.8]).cuda()
+        self.feat_size = (24, 40)  # feature size
 
     def _state_reset(self):
+        """Reset Features for states."""
+        # self.feat_self = resize(self.feat_last_full, scale_factor=self.actions[-1])
+        self.feat_self = self.feat_last_full
+        self.feat_diff = torch.zeros_like(self.feat_self)
+        self.feat_FAR = torch.tensor([0.]).cuda()
+        self.feat_history = torch.zeros([10]).cuda()
 
-        # self.data = self.data_loader[self.start_frame + self.idx_frame]
-        # self.data = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame)
+        self.state = [self.feat_diff, self.feat_self, self.feat_FAR, self.feat_history]
+
+    def reset(self, index=0):
+        if self.is_train:
+            # Randomly select a video from train list
+            video_name = random.sample(self.videos, 1)[0]
+        else:
+            # Select video from validation list
+            video_name = self.videos[index]
+
+        # Get data loader of the selected video
+        self.cfg_test = modify_cfg(self.cfg, video_name)
+        # TODO DATASET 生成方式
+        # self.dataset = obj_from_dict(self.cfg_test, datasets, dict(test_mode=True))
+        self.dataset = get_dataset(self.cfg_test)
+        print('video name: {}.\t len of dataset{}. '.format(video_name, len(self.dataset)))
+        self.data_loader = get_dataloader(self.dataset)
+
+        if self.is_train:
+            # random choose a start frame, at list 10 frames to run.
+            if len(self.data_loader) <= 10:
+                self.start_frame = 0
+            else:
+                self.start_frame = np.random.randint(min(len(self.data_loader) - 10, 10))
+        else:
+            # start from the first frame.
+            self.start_frame = 0
+        self.idx_frame = 0
         self.data_current_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame)
         self.data_last_full = self.data_current_full
         self.feat_last_full = self.get_self_feat(self.data_current_full['img'])
 
-        # self.current_data['img'][0] = self.resize(self.current_data['img'][0], scale_factor=self.actions[-1])
-        # 自身的特征
-        self.feat_self = self.resize(self.feat_last_full, scale_factor=self.actions[-1])
-        # 跟高清差异的特征
-        self.feat_diff = torch.zeros_like(self.feat_self)
-
-        self.feat_FAR = torch.tensor([0]).cuda()
-        self.feat_history = torch.zeros([5]).cuda()
-        # for i in range(self.feat_history.maxsize):
-        #     self.feat_history.put(0)
-
-        self.state = [self.feat_diff, self.feat_self, self.feat_FAR, self.feat_history]
-
-    def reset(self):
-
-        # random select a video
-        # video_id = np.random.randint(len(self.videos))
-        # video_name = self.videos[video_id]
-        video_name = random.sample(self.videos, 1)[0]
-        print('video name: {}.'.format(video_name))
-        # get data loader of the selected video
-        self.cfg_test = modify_cfg(self.cfg, video_name)
-        # self.dataset = obj_from_dict(self.cfg_test, datasets, dict(test_mode=True))
-        self.dataset = get_dataset(self.cfg_test)
-        print(len(self.dataset))
-        self.data_loader = get_dataloader(self.dataset)
-
-        # random choose a start frame, at list 10 frames to run.
-        # print('len of loader ', len(self.data_loader))
-        self.start_frame = np.random.randint(min(len(self.data_loader) - 10, 10))
-        self.idx_frame = 0
-
-        # reset state
         self._state_reset()
-
         self.rewards = []
         self.done = False
+
         return self.state
 
     def _update_state(self, a):
@@ -171,69 +144,85 @@ class DecisionEnv(object):
             self.feat_FAR = (self.feat_FAR * self.idx_frame + 0) / (self.idx_frame + 1)
 
         self.data_current_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame)
-        self.data_current_low = self.data_current_full
+        self.data_current_low = get_low_data(copy.deepcopy(self.data_current_full), scale_facotr=self.actions[-1])
+        self.data_current_a3 = self.data_current_low.copy()
+        self.data_current_a2 = get_low_data(copy.deepcopy(self.data_current_full), scale_facotr=self.actions[2])
+        self.data_current_a1 = get_low_data(copy.deepcopy(self.data_current_full), scale_facotr=self.actions[1])
 
-        self.data_current_low['img'] = self.resize(self.data_current_low['img'], scale_factor=self.actions[-1])
-        self.data_current_low['ref_img'] = self.resize(self.data_current_low['ref_img'], scale_factor=self.actions[-1])
-        self.data_current_low['gt_bboxes'][0] = (self.data_current_low['gt_bboxes'][0] * self.actions[-1]).floor()
-        self.data_current_low['ref_bboxes'][0] = (self.data_current_low['ref_bboxes'][0] * self.actions[-1]).floor()
-        # self.data_current_low['gt_masks'][0] = self.resize(self.data_current_low['gt_masks'][0], scale_factor=self.actions[-1])
-        self.data_current_low['img_meta'][0]['img_shape'] = (180, 320, 3)
-        self.data_current_low['img_meta'][0]['pad_shape'] = (96, 160, 3)
-        self.data_current_low['img_meta'][0]['scale_factor'] = 0.125
-        # 自身的特征
+        # Update states.
         self.feat_self = self.get_self_feat(self.data_current_low['img'])
+        # feat_last_low = resize(self.feat_last_full, scale_factor=self.actions[-1])
+        self.feat_diff = self.get_diff_feat(self.feat_last_full, self.feat_self)
 
-        # 跟高清差异的特征
-        feat_last_low = self.resize(self.feat_last_full, scale_factor=self.actions[-1])
-        self.feat_diff = self.get_diff_feat(feat_last_low, self.feat_self)
-
-        # 历史动作特征
-        self.feat_history[:-1] = self.feat_history[1:]
-        self.feat_history[-1] = a
+        self.feat_history[:-2] = self.feat_history[2:]
+        self.feat_history[-2:] = torch.from_numpy(one_hot(a)).to(self.device)
 
         self.state = [self.feat_diff, self.feat_self, self.feat_FAR, self.feat_history]
         return self.state
 
-    def _get_reward(self, a):
+    def _get_reward(self, a, show=False):
+        """ When action is full resolution. Update last full feature maps, return reward 0. When action is
+        low resolution. Calculate the loss of full resolution and low resolution image data, return reward."""
+        with torch.no_grad():
+            loss_full, feat_map = self.model(return_loss=True, key_frame=None, **self.data_current_full)
+            key_feat = self.data_last_full
+            key_feat['feat_map_last'] = self.feat_map_last
+            loss_low3, _ = self.model(return_loss=True, key_frame=None, **self.data_current_a3)
+            loss_low2, _ = self.model(return_loss=True, key_frame=None, **self.data_current_a2)
+            loss_low1, _ = self.model(return_loss=True, key_frame=None, **self.data_current_a1)
 
-        # When action is full resolution. Update last full feature maps, return reward 0.
-        if a in [0]:
-            data = self.data_last_full
-            with torch.no_grad():
-                _, feat_map = self.model(return_loss=True, key_feat=None, **data)
-            self.feat_map_last = feat_map
-            return 0
+            # 去掉match loss\loss_reg\loss_cls
+            loss_f = loss_full['loss_mask']
+            loss_l3 = loss_low3['loss_mask']
+            loss_l2 = loss_low2['loss_mask']
+            loss_l1 = loss_low1['loss_mask']
+            print("loss_f:{},\tloss_l1:{},\tloss_l2:{},\tloss_l3:{}"
+                  .format(loss_f.item(), loss_l1.item(), loss_l2.item(), loss_l3.item()))
 
-        # When action is low resolution.
-        # Calculate the loss of full resolution and low resolution image data, return reward.
-        key_feat = self.data_last_full
-        key_feat['feat_map_last'] = self.feat_map_last
-        # with torch.no_grad():
-        loss_full, _ = self.model(return_loss=True, key_feat=None, **self.data_current_full)
+            loss = [loss_f.item(), loss_l1.item(), loss_l2.item(), loss_l3.item()]
+            r = min(loss) - loss[a] + self.speed_rewards[a]
+            # r = min(loss) - loss[a]
 
-        loss_low, _ = self.model(return_loss=True, key_feat=key_feat, **self.data_current_low)
-
-        r = loss_low['loss_mask'] - loss_full['loss_mask']
-
-        return r
+            # show = True
+            # if show:
+            #     save_path = '/home/ubuntu/code/fengda/MaskTrackRCNN/'
+            #     dataset = self.data_loader.dataset
+            #     result = self.model(return_loss=False, **self.data_current_full)
+            #     self.model.module.show_result(self.data_current_full, result, dataset.img_norm_cfg,
+            #                                   dataset=dataset.CLASSES,
+            #                                   save_vis=True,
+            #                                   save_path=save_path,
+            #                                   is_video=True)
+            # r = 0
+            if a in [0]:
+                return r, feat_map
+            else:
+                return r, None
 
     def step(self, a):
-        a = self.trans_action(a)
+        # a = self.trans_action(a)
         assert a in [0, 1, 2, 3]
 
-        s_plus = self._update_state(a)
+        self._update_state(a)
 
-        r = self._get_reward(a)
+        try:
+            r, feat_map = self._get_reward(a)
+        except RuntimeError:
+            print(traceback.print_exc())
+            r = 0
+            feat_map = None
 
-        FAR_thr = 0.8
-        if self.feat_FAR > FAR_thr:
+        if a in [0]:
+            assert feat_map is not None, "Feature maps cannot be None when action is 1."
+            self.feat_map_last = feat_map
+        # if self.is_train:
+        #     if self.feat_FAR > self.FAR_thr:
+        #         self.done = True
+
+        if (self.start_frame + self.idx_frame) >= len(self.dataset) - 1:
             self.done = True
-
-        if (self.start_frame + self.idx_frame) >= len(self.dataset)-1:
-            self.done = True
-
-        return s_plus, r, self.done
+        print("frame:{},\taction:{},\treward:{}".format(self.start_frame + self.idx_frame, a, r))
+        return self.state, r, self.done
 
     @staticmethod
     def trans_action(a):
@@ -256,40 +245,6 @@ class DecisionEnv(object):
     def seed(self, s):
         pass
 
-    @staticmethod
-    def resize(img, scale_factor, size_divisor=None):
-        # resize image according to scale factor.
-
-        img = nn.functional.interpolate(img, scale_factor=scale_factor, mode='bilinear', align_corners=True)
-        device = img.device
-        img_np = np.transpose(img.squeeze().detach().cpu().numpy(), (1, 2, 0))
-
-        if size_divisor:
-            # The size of last feature map is 1/32(specially for resnet50) of the original image,
-            # Impad to ensure that the original image size is multiple of 32.
-            img_np = mmcv.impad_to_multiple(img_np, size_divisor)
-
-        img = torch.from_numpy(np.transpose(img_np, (2, 0, 1))).unsqueeze(0).to(device)
-        # data['img'][0] = img
-
-        return img
-
-    @staticmethod
-    def change_img_meta(data, scale_factor):
-        # resize image according to scale factor.
-        img = data['img'][0]
-        img_meta = data['img_meta'][0]
-
-        # change image meta info according to scale factor change.
-        img_meta[0][0]['img_shape'] = (int(img_meta[0][0]['img_shape'][0] * scale_factor),
-                                    int(img_meta[0][0]['img_shape'][1] * scale_factor), 3)
-        img_meta[0][0]['pad_shape'] = img.shape
-        img_meta[0][0]['scale_factor'] = img_meta[0][0]['scale_factor'] * scale_factor
-
-        data['img_meta'][0] = img_meta
-
-        return data
-
     # @staticmethod
     def get_self_feat(self, input):
         '''
@@ -297,20 +252,21 @@ class DecisionEnv(object):
         :param img_tensor: a tensor with size of batchsize * channels * height * weight
         :return:
         '''
-        model = models.resnet50(pretrained=True).to(self.device)
-        model.eval()
+        outs, out0 = self.model.extract_feat(input)
+        if outs[0].shape[-2:] != self.feat_size:
+            return resize(outs[0], self.feat_size)
+        else:
+            return outs[0]
 
-        x = input
-        x = model.conv1(x)
-        x = model.bn1(x)
-        x = model.relu(x)
-        x = model.maxpool(x)
-        x = model.layer1(x)
-        # print(x.size())
-
-        return x.cuda()
-
-    @staticmethod
-    def get_diff_feat(full_data, current_data):
+    # @staticmethod
+    def get_diff_feat(self, full_data, current_data):
+        if full_data.shape[-2:] != self.feat_size:
+            full_data = resize(full_data, self.feat_size)
+        if current_data.shape[-2:] != self.feat_size:
+            current_data = resize(current_data, self.feat_size)
         # full_data['img'][0] = self.resize(full_data['img'][0], scale_factor=self.actions[-1])
+        assert full_data.shape == current_data.shape, "feature size donnot match."
         return full_data - current_data
+
+
+
