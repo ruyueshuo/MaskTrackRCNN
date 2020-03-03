@@ -1,4 +1,5 @@
 from .two_stage_flow_test import TwoStageDetectorFlowTest
+from .two_stage_flow import TwoStageDetectorFlow
 from ..registry import DETECTORS
 
 
@@ -14,9 +15,9 @@ class MaskRCNNFlow(TwoStageDetectorFlowTest):
                  track_head,
                  mask_roi_extractor,
                  mask_head,
-                 flow_head,
                  train_cfg,
                  test_cfg,
+                 flow_head=None,
                  pretrained=None):
         super(MaskRCNNFlow, self).__init__(
             backbone=backbone,

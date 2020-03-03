@@ -1,4 +1,5 @@
 import argparse
+import numpy as np
 
 import torch
 import mmcv
@@ -7,36 +8,63 @@ from mmcv.parallel import scatter, collate, MMDataParallel
 
 from mmdet import datasets
 from mmdet.core import results2json_videoseg, ytvos_eval
-from mmdet.datasets import build_dataloader
+from mmdet.datasets import build_dataloader, get_dataset
 from mmdet.models import build_detector, detectors
 from mmdet.models.flow_heads.flownetC_head import FlowNetCHead
+from mmdet.models.decision_net.utils import trans_action, change_img_meta, resize, modify_cfg, get_dataloader
 
 
-def single_test(model, data_loader, cfg, show=False, save_path=''):
+def single_test(model, tst_videos, cfg, env=None, rl_model=None, show=False, save_path=''):
     model.eval()
+    rl_model.eval()
     results = []
-    import numpy as np
-    avg_time = np.zeros((1, 4))
-    dataset = data_loader.dataset
-    prog_bar = mmcv.ProgressBar(len(dataset))
-    num = 0
-    for i, data in enumerate(data_loader):
 
-        with torch.no_grad():
-            result = model(return_loss=False, rescale=False, key_frame=True, **data)
+    prog_bar = mmcv.ProgressBar(len(tst_videos))
 
-        results.append(result)
-        show = True
-        if show:
-            model.module.show_result(data, result, dataset.img_norm_cfg,
-                                     dataset=dataset.CLASSES,
-                                     save_vis=True,
-                                     save_path=save_path,
-                                     is_video=True)
+    scale_factors = [1, 1 / 2, 1 / 3, 1 / 4]
 
-        batch_size = data['img'][0].size(0)
-        for _ in range(batch_size):
-            prog_bar.update()
+    for video_name in tst_videos:
+        # Build dataloader
+        cfg_val = modify_cfg(cfg, video_name, is_train=False)
+        dataset = get_dataset(cfg_val)
+        print('len of dataset ', len(dataset))
+        data_loader = get_dataloader(dataset)
+
+        for i, data in enumerate(data_loader):
+            # Image Resolution is calculated by reinforcement learning algorithm.
+            img_meta = data['img_meta'][0].data
+            is_first = img_meta[0][0]['is_first']
+            if is_first:
+                key_frame = True
+            else:
+                key_frame = False
+                state = None
+
+                # Get Scale Factor
+                action = rl_model.get_action(state)
+                scale_factor = scale_factors[trans_action(action)]
+
+                # Resize image according to scale factor. Impad to meet FPN requirement.
+                data['img'][0] = resize(data['img'][0], scale_factor=scale_factor, size_divisor=32)
+
+                # Change image meta info according to scale factor.
+                data = change_img_meta(data, scale_factor=scale_factor)
+
+            with torch.no_grad():
+                result = model(return_loss=False, key_frame=key_frame, rescale=True, **data)
+            results.append(result)
+
+            show = False
+            if show:
+                model.module.show_result(data, result, dataset.img_norm_cfg,
+                                         dataset=dataset.CLASSES,
+                                         save_vis=True,
+                                         save_path=save_path,
+                                         is_video=True)
+
+            batch_size = data['img'][0].size(0)
+            for _ in range(batch_size):
+                prog_bar.update()
     return results
 
 
@@ -79,10 +107,7 @@ def parse_args():
     args = parser.parse_args()
 
     import os
-    # args.save_path = os.path.dirname(args.checkpoint) + '/'
-    args.save_path = '/home/ubuntu/code/fengda/MaskTrackRCNN/results/test/full/'
-    if not os.path.exists(args.save_path):
-        os.makedirs(args.save_path)
+    args.save_path = os.path.dirname(args.checkpoint) + '/'
 
     return args
 
@@ -103,7 +128,9 @@ def main():
     cfg.model.pretrained = None
     cfg.data.test.test_mode = True
 
-    # get dataset
+    # get video list
+    with open('valid.txt', "r") as f:  # 设置文件对象
+        videos = f.read()  # 可以是随便对文件的操作
     dataset = obj_from_dict(cfg.data.test, datasets, dict(test_mode=True))
 
     # build model
@@ -116,19 +143,12 @@ def main():
     # model_flow = FlowNetCHead()
     # load_checkpoint(model_flow, args.checkpointflow)
 
-    data_loader = build_dataloader(
-        dataset,
-        imgs_per_gpu=1,
-        workers_per_gpu=cfg.data.workers_per_gpu,
-        num_gpus=1,
-        dist=False,
-        shuffle=False)
     if args.load_result:
         outputs = mmcv.load(args.out)
 
     else:
         # test
-        outputs = single_test(model, data_loader, cfg, args.show, save_path=args.save_path)
+        outputs = single_test(model, videos, cfg, args.show, save_path=args.save_path)
 
     if args.out:
         if not args.load_result:
@@ -147,31 +167,4 @@ def main():
 
 
 if __name__ == '__main__':
-    # data_root = '/home/ubuntu/datasets/YT-VIS/'
-    # ann_file = data_root + 'annotations/instances_train_sub.json'
-    # import json
-    # with open(ann_file, 'r') as f:
-    #     ann = json.load(f)
-    #     # ann['videos'] = ann['videos'][15]
-    #     video_id = [0, 1, 2, 3, 4]
-    #     videos = []
-    #     anns =[]
-    #     for id in video_id:
-    #         videos.append(ann['videos'][id])
-    #         anns.append(ann['annotations'][id])
-    #     ann['videos'] = videos
-    #     ann['annotations'] = anns
-    #     # videos = ann['videos'][video_id]
-    #     # ann['videos'] = []
-    #     # ann['videos'].append(videos)
-    #     # anns = ann['annotations'][video_id]
-    #     # ann['annotations'] = []
-    #     # ann['annotations'].append(anns)
-    #
-    # with open(data_root + 'annotations/instances_test_sub.json', 'w') as f:
-    #     json.dump(ann, f, ensure_ascii=False)
-
-    # from mmdet.models.mask_heads.res5_mask_head import ResMaskHead
-    # model = ResMaskHead()
-    # print(model)
     main()

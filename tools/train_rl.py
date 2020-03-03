@@ -190,10 +190,12 @@ def her_training(trn_env, val_env, agent, args):
                 # print('rollout:{}'.format(rollout))
                 # Sample an action from behavioural policy pi
                 if rollout == 0:
-                    action = agent.get_action(state=state, noise=False)
-                    action = np.clip(action, 0.75, 1)
+                    action = 0
+                    # action = agent.get_action(state=state, noise=False)
+                    # action = np.clip(action, 0.75, 1)
                 else:
-                    action = agent.get_action(state=state, noise=False)
+                    action = agent.select_action(state=state)
+                    # action = agent.get_action(state=state, noise=False)
 
                 # Execute the action and observe the new state
                 new_state, reward, done = val_env.step(action)
@@ -327,7 +329,7 @@ if __name__ == "__main__":
     future = 0
 
     seed = args.seed
-    buffer_capacity = int(100)
+    buffer_capacity = int(5000)
     input_dim = 512
     action_dim = 4
     q_dim = 1

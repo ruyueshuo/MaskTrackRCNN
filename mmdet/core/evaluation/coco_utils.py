@@ -3,8 +3,8 @@ import numpy as np
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from pycocotools.ytvos import YTVOS
-from pycocotools.ytvoseval import YTVOSeval
-
+# from pycocotools.ytvoseval import YTVOSeval
+from mmdet.datasets.eval.ytvoseval import YTVOSeval
 from .recall import eval_recalls
 
 

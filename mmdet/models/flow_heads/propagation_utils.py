@@ -69,9 +69,12 @@ def warp(key_feature, flow):
     :param flow: the motion from key frame to non-key frame, with size of batchsize * 2 * h * w
     :return:  non-key feature, tesnsor with size of batchsize * channels * h * w
     '''
-    gpu_device = flow.device
-    key_feature = key_feature.cpu()
-    flow = flow.cpu()
+    if len(flow.shape) != 4:
+        flow = flow.unsqueeze(0)
+    device = flow.device
+    dtype = flow.dtype
+
+    # flow = F.interpolate(flow, key_feature.shape[-2:], mode='bilinear', align_corners=True)
 
     flow = flow.permute([0, 2, 3, 1]).contiguous()  # 便于检索
     orig_size = key_feature.shape[-2:]
@@ -86,9 +89,13 @@ def warp(key_feature, flow):
     raw_location = get_xyindex_improved(height, weight)
     raw_location = np.array(raw_location).reshape((height, weight, 2))
     raw_location = torch.from_numpy(raw_location)
-
-    device = flow.device
-    raw_location = raw_location.to(device).float()
+    raw_location = raw_location.to(device)
+    raw_location = raw_location.float()
+    # base_index_x, base_index_y = torch.meshgrid([torch.arange(flow.size()[1]), torch.arange(flow.size()[2])])
+    # base_index = torch.stack([base_index_x, base_index_y], -1).view(flow.size()[1], flow.size()[2], 2).to(device)
+    # base_index = torch.stack([base_index for _ in range(flow.size()[0])])
+    # # raw_location = base_index.to(device)
+    # raw_location = base_index.float()
     # 移动之后的location
     flow_index = flow + raw_location
 
@@ -102,6 +109,8 @@ def warp(key_feature, flow):
     x_index = flow_index[:, :, :, 0].reshape(batch_size, height, weight, 1)
     y_index = flow_index[:, :, :, 1].reshape(batch_size, height, weight, 1)
 
+    # y_index = flow_index[:, :, :, 0].reshape(batch_size, height, weight, 1)
+    # x_index = flow_index[:, :, :, 1].reshape(batch_size, height, weight, 1)
     #
     x_floor = torch.floor(x_index)
     x_ceil = torch.ceil(x_index)
@@ -144,8 +153,11 @@ def warp(key_feature, flow):
 
     warp_image = F.interpolate(warp_image, orig_size, mode='bilinear', align_corners=True)
 
-    torch.cuda.empty_cache()
-    return warp_image.to(gpu_device)
+    del key_feature, raw_location, max_location, min_location, batch_index, flow_index, flow_index_cc, flow_index_cf,\
+        flow_index_fc, flow_index_ff, ff, cf, fc, cc
+    # torch.cuda.empty_cache()
+    return warp_image
+
 
 def warp1(key_feature, flow):
     '''
@@ -226,6 +238,50 @@ def warp1(key_feature, flow):
     warp_image = F.interpolate(warp_image, orig_size, mode='bilinear', align_corners=True)
 
     return warp_image
+
+
+def gather_nd(input, gather_index):
+    # input: [batch_size, channels, height, width], gather_index: [batch_index, 2, height, width]
+    input.cuda()
+    gather_index.cuda()
+    base_index_x, base_index_y = torch.meshgrid([torch.arange(input.size()[2]), torch.arange(input.size()[3])])
+    base_index = torch.stack([base_index_x, base_index_y], -1).view(input.size()[2], input.size()[3], 2).cuda()
+    base_index = torch.stack([base_index for _ in range(input.size()[0])]).double().cuda()
+
+    input = input.permute(0, 2, 3, 1).contiguous().double()
+    gather_index = gather_index.permute(0, 2, 3, 1).contiguous().double()
+    gather_index = base_index + gather_index
+    gather_index = gather_index.view(-1, 2).double()
+    clamp_gather_index = torch.DoubleTensor(gather_index.size()).cuda()
+    clamp_gather_index[:, 0] = torch.clamp(gather_index[:, 0], 0., float(input.size()[1] - 1)).double()
+    clamp_gather_index[:, 1] = torch.clamp(gather_index[:, 1], 0., float(input.size()[2] - 1)).double()
+    gather_index_ceil = torch.ceil(clamp_gather_index).double()
+    gather_index_floor = torch.floor(clamp_gather_index).double()
+
+    output = []
+    for i in range(gather_index.size()[0]):
+        batch_index = i // (input.size()[1] * input.size()[2])
+
+        cor_x, cor_y = clamp_gather_index[i][0], clamp_gather_index[i][1]
+        cor_x_ceil, cor_y_ceil = gather_index_ceil[i][0], gather_index_ceil[i][1]
+        cor_x_floor, cor_y_floor = gather_index_floor[i][0], gather_index_floor[i][1]
+        weight_ceil_x, weight_ceil_y = cor_x - cor_x_floor, cor_y - cor_y_floor
+        weight_floor_x, weight_floor_y = cor_x_ceil - cor_x, cor_y_ceil - cor_y
+
+        cor_x_ceil = cor_x_ceil.int()
+        cor_y_ceil = cor_y_ceil.int()
+        cor_x_floor = cor_x_floor.int()
+        cor_y_floor = cor_y_floor.int()
+        output_ceil = input[batch_index, cor_x_ceil, cor_y_ceil]
+        output_floor = input[batch_index, cor_x_floor.int(), cor_y_floor.int()]
+        output_y_ceil = weight_ceil_x * input[batch_index, cor_x_ceil.int(), cor_y_ceil.int()] + weight_floor_x * input[batch_index, cor_x_floor.int(), cor_y_ceil.int()]
+        output_y_floor = weight_ceil_x * input[batch_index, cor_x_ceil.int(), cor_y_floor.int()] + weight_floor_x * input[batch_index, cor_x_floor.int(), cor_y_floor.int()]
+        output.append(weight_ceil_y * output_y_ceil + weight_floor_y * output_y_floor)
+
+    result = torch.stack(output, 0).view(tuple(input.size())).permute(0, 3, 1, 2).contiguous().float()
+
+    return result
+
 
 if __name__ == '__main__':
     '''

@@ -23,8 +23,11 @@ def single_test(model, data_loader, show=False, save_path=''):
             result = model(return_loss=False, rescale=True, **data)
             # avg_time += result[2]
             # print(avg_time)
+        # bbox_result = result[0]
+        # for key, item in result[0].items():
+        #     print("{}\t".format(item['bbox'][-1]))
         results.append(result)
-
+        # show = False
         if show:
             model.module.show_result(data, result, dataset.img_norm_cfg,
                                      dataset=dataset.CLASSES,
@@ -47,7 +50,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='MMDet test detector')
     parser.add_argument('--config', default="../configs/masktrack_rcnn_r50_fpn_1x_youtubevos.py",
                         help='test config file path')
-    parser.add_argument('--checkpoint', default="../results/20191213-163326/epoch_16.pth", help='checkpoint file')
+    parser.add_argument('--checkpoint', default="../results/20200225-125037/epoch_11.pth", help='checkpoint file')
+    # /home/ubuntu/code/fengda/MaskTrackRCNN/results/20200225-125037/epoch_11.pth
     parser.add_argument(
         '--save_path', default="/home/ubuntu/datasets/YT-VIS/results/",
         type=str,
@@ -67,7 +71,7 @@ def parse_args():
         help='whether to load existing result')
     parser.add_argument(
         '--eval',
-        default=['bbox', 'segm'],
+        default=['segm'],
         type=str,
         nargs='+',
         choices=['bbox', 'segm'],
@@ -77,8 +81,10 @@ def parse_args():
     args = parser.parse_args()
 
     import os
-    args.save_path = os.path.dirname(args.checkpoint) + '/'
-
+    # args.save_path = os.path.dirname(args.checkpoint) + '/'
+    # args.save_path = '/home/ubuntu/code/fengda/MaskTrackRCNN/results/test/orig/'
+    # if not os.path.exists(args.save_path):
+    #     os.makedirs(args.save_path)
     return args
 
 

@@ -112,6 +112,7 @@ class BaseDetector(nn.Module):
                     dataset='coco',
                     is_video=False,
                     save_vis=False,
+                    rescale=False,
                     save_path='vis',
                     score_thr=0.1):
         if isinstance(result, tuple):
@@ -141,7 +142,10 @@ class BaseDetector(nn.Module):
             return
         assert len(imgs) == 1, "only support mini-batch size 1"
         for img, img_meta in zip(imgs, img_metas):
-            h, w, _ = img_meta['img_shape']
+            if rescale:
+                h, w, _ = img_meta['ori_shape']
+            else:
+                h, w, _ = img_meta['img_shape']
             #img_show = img[:h, :w, :]
             img_show = np.zeros((h,w,3)) 
             if not is_video:
@@ -165,8 +169,11 @@ class BaseDetector(nn.Module):
                       color_id = obj_ids[i]
                     img_show[mask] = self.color_mask[color_id,:]
             if save_vis:
-              show = False 
-              save_path = '{}/{}/{}.png'.format(save_path, img_meta['video_id'], img_meta['frame_id'])
+              show = False
+              if img_meta['file_name']:
+                  save_path = '{}/{}.png'.format(save_path, img_meta['file_name'][:-4])
+              else:
+                save_path = '{}/{}/{}.png'.format(save_path, img_meta['video_id'], img_meta['frame_id'])
             else:
               show = True
               save_path = None

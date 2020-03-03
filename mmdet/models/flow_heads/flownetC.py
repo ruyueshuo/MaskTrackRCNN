@@ -21,10 +21,10 @@ __all__ = [
 class FlowNetC(nn.Module):
     expansion = 1
 
-    def __init__(self, checkpoint=None, batchNorm=True):
+    def __init__(self, checkpoint=None, batchNorm=True, div_flow=20):
         super(FlowNetC,self).__init__()
-        if checkpoint:
-            self.checkpoint = checkpoint
+
+        self.div_flow = div_flow
 
         self.batchNorm = batchNorm
         self.conv1      = conv(self.batchNorm,   3,   64, kernel_size=7, stride=2)
@@ -70,6 +70,10 @@ class FlowNetC(nn.Module):
                 constant_(m.weight, 1)
                 constant_(m.bias, 0)
 
+        if checkpoint:
+            self.checkpoint = checkpoint
+            load_checkpoint(self, self.checkpoint)
+
     def init_weights(self):
         """load checkpoint."""
         load_checkpoint(self, self.checkpoint)
@@ -91,7 +95,7 @@ class FlowNetC(nn.Module):
         out_corr = self.corr(out_conv3a, out_conv3b)  # False
         out_correlation = self.corr_activation(out_corr)
 
-        in_conv3_1 = torch.cat([out_conv_redir, out_correlation], dim=1)
+        in_conv3_1 = torch.cat((out_conv_redir, out_correlation), dim=1)
 
         out_conv3 = self.conv3_1(in_conv3_1)
         out_conv4 = self.conv4_1(self.conv4(out_conv3))
@@ -102,26 +106,26 @@ class FlowNetC(nn.Module):
         flow6_up    = crop_like(self.upsampled_flow6_to_5(flow6), out_conv5)
         out_deconv5 = crop_like(self.deconv5(out_conv6), out_conv5)
 
-        concat5 = torch.cat((out_conv5,out_deconv5,flow6_up),1)
+        concat5 = torch.cat((out_conv5,out_deconv5,flow6_up),dim=1)
         flow5       = self.predict_flow5(concat5)
         flow5_up    = crop_like(self.upsampled_flow5_to_4(flow5), out_conv4)
         out_deconv4 = crop_like(self.deconv4(concat5), out_conv4)
 
-        concat4 = torch.cat((out_conv4,out_deconv4,flow5_up),1)
+        concat4 = torch.cat((out_conv4,out_deconv4,flow5_up),dim=1)
         flow4       = self.predict_flow4(concat4)
         flow4_up    = crop_like(self.upsampled_flow4_to_3(flow4), out_conv3)
         out_deconv3 = crop_like(self.deconv3(concat4), out_conv3)
 
-        concat3 = torch.cat((out_conv3,out_deconv3,flow4_up),1)
+        concat3 = torch.cat((out_conv3,out_deconv3,flow4_up),dim=1)
         flow3       = self.predict_flow3(concat3)
         flow3_up    = crop_like(self.upsampled_flow3_to_2(flow3), out_conv2a)
         out_deconv2 = crop_like(self.deconv2(concat3), out_conv2a)
 
-        concat2 = torch.cat((out_conv2a,out_deconv2,flow3_up),1)
+        concat2 = torch.cat((out_conv2a,out_deconv2,flow3_up),dim=1)
         flow2 = self.predict_flow2(concat2)
 
         if self.training:
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             return flow2,flow3,flow4,flow5,flow6
         else:
             torch.cuda.empty_cache()
@@ -158,3 +162,5 @@ def flownetc_bn(data=None):
     if data is not None:
         model.load_state_dict(data['state_dict'])
     return model
+
+

@@ -1,7 +1,8 @@
 # model settings
 model = dict(
     type='MaskRCNN',
-    pretrained='modelzoo://resnet50',
+    # pretrained='modelzoo://resnet50',
+    pretrained='torchvision://resnet50',
     backbone=dict(
         type='ResNet',
         depth=50,
@@ -18,7 +19,7 @@ model = dict(
         type='RPNHead',
         in_channels=256,
         feat_channels=256,
-        anchor_scales=[8],
+        anchor_scales=[16],
         anchor_ratios=[0.5, 1.0, 2.0],
         anchor_strides=[4, 8, 16, 32, 64],
         target_means=[.0, .0, .0, .0],
@@ -118,25 +119,27 @@ dataset_type = 'YTVOSDataset'
 data_root = '/home/ubuntu/datasets/YT-VIS/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+    # mean=[104.805, 110.16, 114.75], std=[255, 255, 255], to_rgb = True)
+
 data = dict(
-    imgs_per_gpu=8,
-    workers_per_gpu=2,
+    imgs_per_gpu=1,
+    workers_per_gpu=0,
     train=dict(
         type=dataset_type,
-        ann_file=data_root + 'annotations/instances_train_sub.json',
+        ann_file=data_root + 'annotations/instances_train_train_annotations.json',
         img_prefix=data_root + 'train/JPEGImages',
-        img_scale=[(320, 180), (640, 360)],
+        img_scale=[(640, 360)],
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
-        flip_ratio=0.5,
+        flip_ratio=0,
         with_mask=True,
         with_crowd=True,
         with_label=True,
         with_track=True),
     val=dict(
         type=dataset_type,
-        ann_file=data_root + 'annotations/instances_val_sub.json',
-        img_prefix=data_root + 'valid/JPEGImages',
+        ann_file=data_root + 'annotations/instances_train_valid_annotations.json',
+        img_prefix=data_root + 'train/JPEGImages',
         img_scale=(640, 360),
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
@@ -147,8 +150,8 @@ data = dict(
         with_track=True),
     test=dict(
         type=dataset_type,
-        ann_file=data_root + 'annotations/instances_val_sub.json',
-        img_prefix=data_root + 'valid/JPEGImages',
+        ann_file=data_root + 'annotations/instances_train_valid_annotations.json',
+        img_prefix=data_root + 'train/JPEGImages',
         img_scale=(640, 360),
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
@@ -158,7 +161,7 @@ data = dict(
         test_mode=True,
         with_track=True))
 # optimizer
-optimizer = dict(type='SGD', lr=0.005, momentum=0.9, weight_decay=0.0001)
+optimizer = dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -177,7 +180,7 @@ log_config = dict(
     ])
 # yapf:enable
 # runtime settings
-total_epochs = 16
+total_epochs = 20
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = './work_dirs/masktrack_rcnn_r50_fpn_1x_youtubevos'

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import mmcv
+import torchvision.models as models
 
 from .base import BaseDetector
 from .test_mixins import RPNTestMixin, BBoxTestMixin, MaskTestMixin
@@ -15,27 +16,14 @@ from .. import builder
 from ..registry import DETECTORS
 from mmdet.core import bbox2roi, bbox2result, build_assigner, build_sampler
 from mmdet.core import bbox_overlaps, bbox2result_with_id
-from ..flow_heads.propagation_utils import warp
+from ..flow_heads.propagation_utils import warp, gather_nd
+from ..decision_net.utils import resize, change_img_meta, trans_action
+from mmdet.models.flow_heads import FlowNetC, flownetc
 
 
 @DETECTORS.register_module
 class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
                            MaskTestMixin):
-    """
-
-    :param backbone: ConfigDict,采用的backbone网络结构
-    :param neck: ConfigDict,采用的neck网络结构
-    :param rpn_head: ConfigDict,采用的rep_head网络结构
-    :param bbox_roi_extractor: ConfigDict,采用的bbox_roi_extractor网络结构
-    :param bbox_head: ConfigDict,采用的bbox_head网络结构
-    :param track_head: ConfigDict,采用的track_head网络结构
-    :param mask_roi_extractor: ConfigDict,采用的mask_roi_extractor网络结构
-    :param mask_head: ConfigDict,采用的mask_head网络结构
-    :param train_cfg: ConfigDict, 训练配置参数
-    :param test_cfg: ConfigDict, 测试配置参数
-    :param pretrained: str, e.g.: 'modelzoo://resnet50'
-    """
-
     def __init__(self,
                  backbone,
                  neck=None,
@@ -49,6 +37,20 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None):
+        """
+        :param backbone: ConfigDict,采用的backbone网络结构
+        :param neck: ConfigDict,采用的neck网络结构
+        :param rpn_head: ConfigDict,采用的rep_head网络结构
+        :param bbox_roi_extractor: ConfigDict,采用的bbox_roi_extractor网络结构
+        :param bbox_head: ConfigDict,采用的bbox_head网络结构
+        :param track_head: ConfigDict,采用的track_head网络结构
+        :param mask_roi_extractor: ConfigDict,采用的mask_roi_extractor网络结构
+        :param mask_head: ConfigDict,采用的mask_head网络结构
+        :param train_cfg: ConfigDict, 训练配置参数
+        :param test_cfg: ConfigDict, 测试配置参数
+        :param pretrained: str, e.g.: 'modelzoo://resnet50'
+        """
+
         super(TwoStageDetectorFlowTest, self).__init__()
         self.backbone = builder.build_backbone(backbone)
 
@@ -73,19 +75,14 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
         if flow_head is not None:
             self.flow_head = builder.build_head(flow_head)
 
+        self.flow_head1 = None
+
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
-
-        # memory queue for testing
-        self.prev_img = None
-        self.frame_info = None
-        self.key_feat_maps = None
-        self.key_feat_res0 = None
 
         self.prev_bboxes = None
         self.prev_roi_feats = None
         self.init_weights(pretrained=pretrained)
-
 
     @property
     def with_rpn(self):
@@ -94,6 +91,19 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
     @property
     def with_flow(self):
         return self.flow_head is not None
+
+    def load_flow(self):
+        # flow_network_data = torch.load("/home/ubuntu/code/fengda/MaskTrackRCNN/pretrained_models/flownetc_EPE1.766.tar")
+        # print("=> using pre-trained model '{}'".format(flow_network_data['arch']))
+        # self.flow_model = FlowNetC(batchNorm=False)
+        # self.flow_model.load_state_dict(flow_network_data['state_dict'])
+        # # flow_model = models.__dict__[flow_network_data['arch']](flow_network_data).cuda()
+        # self.flow_model.cuda()
+        # self.flow_model.eval()
+        # from mmdet.models.flow_heads import FlowNetC
+        self.flow_head1 = FlowNetC(batchNorm=False,
+            checkpoint="/home/ubuntu/code/fengda/MaskTrackRCNN/pretrained_models/flownetc_EPE1.766.tar")
+        # self.flow_head1.requires_grad = False
 
     def init_weights(self, pretrained=None):
         """initialize weights."""
@@ -115,8 +125,10 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
             self.mask_head.init_weights()
         if self.with_track:
             self.track_head.init_weights()
-        if self.with_flow:
-            self.flow_head.init_weights()
+        # if self.with_flow:
+        #     self.flow_head.init_weights()
+        #     self.flow_head.cuda()
+        #     self.flow_head.requires_grad = False
 
     def extract_feat(self, img):
         """extract feature map with backbone and neck."""
@@ -137,19 +149,25 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
                       gt_pids,  # gt ids of current frame bbox mapped to reference frame
                       gt_masks=None,
                       proposals=None,
-                      key_feat=None):
+                      key_frame=None):
 
-        # extract feature
-        if key_feat is None:
+        is_first = img_meta[0]['is_first']
+        if is_first:
+            key_frame = None
+
+        # Extract feature
+        if key_frame is None:
             x, feat_res0 = self.extract_feat(img)
+            key_feat_maps = x
+            # self.key_img = img
         else:
-            full_img = key_feat['img']
-            current_img = img
-            feat_last = key_feat['feat_map_last']
-            flow_outputs = self.flow_head(full_img, current_img)
+            full_img = self.resize(key_frame['img'], img.shape[-2:])
+            feat_last = key_frame['feat_map_last']
+            flow_outputs = self.flow_head1(full_img, img)
+            # from mmdet.models.flow_heads.visualization import plot_flow
+            # plot_flow(flow_outputs[0], 'test.jpg')
             # feature warping
-            feat_stride = [4, 8, 16, 32, 64]
-            x = [warp(feat_map, flow_outputs[0] / stride) for (feat_map, stride) in zip(feat_last, feat_stride)]
+            x = self.warp_feat(feat_last, flow_outputs[0]*self.flow_head.div_flow)
 
         ref_x, ref_feat_res0 = self.extract_feat(ref_img)
 
@@ -320,47 +338,9 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
         return det_bboxes, det_labels, det_obj_ids
 
     def full_test(self, img, img_meta, proposals=None, rescale=False):
-        """Test without augmentation."""
-
-        x, feat_res0 = self.extract_feat(img)
-
-        proposal_list = self.simple_test_rpn(
-            x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
-
-        det_bboxes, det_labels, det_obj_ids = self.simple_test_bboxes(
-            x, img_meta, proposal_list, self.test_cfg.rcnn, rescale=rescale)
-        bbox_results = bbox2result_with_id(det_bboxes, det_labels, det_obj_ids,
-                                   self.bbox_head.num_classes)
-
-        if not self.with_mask:
-            return bbox_results, x
-        else:
-            segm_results = self.simple_test_mask(
-                x, img_meta, det_bboxes, det_labels,
-                rescale=rescale, det_obj_ids=det_obj_ids)
-
-            return bbox_results, segm_results, x
-
-    def low_test(self, img, img_meta, proposals=None, rescale=False, key_feat=None):
-        """Test without augmentation."""
-        # size = (int(360 * np.sqrt(1)), int(640 * np.sqrt(1)))
-        # size of input for pretrained flownet
-        full_img = key_feat[0]['img'][0].cuda()
-        current_img = key_feat[1]['img'][0].cuda()
-        feat_last = list(key_feat[2])
-        size_full = full_img.shape
-        size_current = current_img.shape
-        if size_full[-1] > size_current[-1]:
-            size = size_current[-2:]
-            full_img = self.resize(full_img, size)
-        else:
-            size = size_full[-2:]
-            current_img = self.resize(current_img, size)
-        flow_outputs = self.flow_head(full_img, current_img)
-        # feature warping
-        feat_stride = [4, 8, 16, 32, 64]
-        x = [warp(feat_map, flow_outputs[0] / stride) for (feat_map, stride) in zip(feat_last, feat_stride)]
-        # x, feat_res0 = self.extract_feat(img)
+        """Test without Flow Head."""
+        x, _ = self.extract_feat(img)
+        key_feat_maps = x
 
         proposal_list = self.simple_test_rpn(
             x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
@@ -377,43 +357,149 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
                 x, img_meta, det_bboxes, det_labels,
                 rescale=rescale, det_obj_ids=det_obj_ids)
 
-            return bbox_results, segm_results
+            return bbox_results, segm_results, key_feat_maps
 
-    def simple_test(self, img, img_meta, proposals=None, rescale=False, key_feat=None):
+    def low_test(self, img, img_meta, key_img, key_feats, proposals=None, rescale=False):
+        """Test with Flow Head."""
+        full_img = key_img
+        current_img = img
+        feat_last = key_feats
+        size_full = full_img.shape
+        size_current = current_img.shape
+        if size_full[-1] < size_current[-1]:
+            size = size_current[-2:]
+            full_img = self.resize(full_img, size)
+        else:
+            size = size_full[-2:]
+            current_img = self.resize(current_img, size)
+
+        # Transform data by FlowNet parameters.
+        import torchvision.transforms as transforms
+        flow_transform = transforms.Compose([
+            transforms.
+            transforms.Normalize(mean=[-123.675/58.395, -116.28/57.12, -103.53/57.375], std=[1/58.395, 1/57.12, 1/57.375]),
+            # transforms.Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
+            transforms.Normalize(mean=[104.805, 110.16, 114.75], std=[255, 255, 255]),
+        ])
+
+        full_img_flow = flow_transform(full_img.squeeze(0)).unsqueeze(0)
+        current_img_flow = flow_transform(current_img.squeeze(0)).unsqueeze(0)
+        flow_output = self.flow_head1(full_img_flow, current_img_flow)[0]*20
+
+        # x, _ = self.extract_feat(img)
+        img_size = img.shape[-2:]
+        x = self.warp_feat(feat_last, flow_output, (img_size[0], img_size[1]), mode='warp')
+        proposal_list = self.simple_test_rpn(
+            x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
+
+        det_bboxes, det_labels, det_obj_ids = self.simple_test_bboxes(
+            x, img_meta, proposal_list, self.test_cfg.rcnn, rescale=rescale)
+        bbox_results = bbox2result_with_id(det_bboxes, det_labels, det_obj_ids,
+                                   self.bbox_head.num_classes)
+
+        def feat_fusion(x, feat_last):
+            feat = []
+            for i in range(len(x)):
+                _size = x[i].shape[-2:]
+                _tmp = torch.nn.functional.interpolate(feat_last[i], _size, mode='bilinear', align_corners=True)
+                # feat.append(torch.max(x[i], _tmp))
+                # feat.append((x[i] + _tmp) / 2)
+                feat.append((x[i] + _tmp))
+
+            return tuple(feat)
+
+        # img_size = img.shape[-2:]
+        # x = self.warp_feat(feat_last, flow_output*20, (img_size[0], img_size[1]), mode='warp')
+        # x_flow = self.warp_feat(feat_last, flow_outputs1)
+        # x1 = [resize(x_f, x11.shape[-2:]) for x_f, x11 in zip(x_flow, x)]
+        # x1 = feat_fusion(x, x_flow)
+        if not self.with_mask:
+            return bbox_results
+        else:
+            segm_results = self.simple_test_mask(
+                x, img_meta, det_bboxes, det_labels,
+                rescale=rescale, det_obj_ids=det_obj_ids)
+
+            return bbox_results, segm_results, None
+
+    def simple_test(self, img, img_meta, proposals=None, rescale=False, key_frame=None):
         """Test without augmentation."""
         assert self.with_bbox, "Bbox head must be implemented."
         assert self.with_track, "Track head must be implemented"
-        img = img.cuda()
-        img_meta = img_meta.data[0]
 
-        if key_feat is not None:
-            result = self.low_test(img, img_meta, proposals=None, rescale=False, key_feat=key_feat)
+        is_first = img_meta[0]['is_first']
+
+        # if rl is None:
+        if is_first:
+            key_frame = None
+        if key_frame is not None:
+            result = self.low_test(img, img_meta, key_frame['img'], key_frame['feat_map_last'],
+                                   proposals=proposals, rescale=rescale)
         else:
-            result = self.full_test(img, img_meta, proposals=None, rescale=False)
+            result = self.full_test(img, img_meta, proposals=proposals, rescale=rescale)
 
         return result
-        is_first = img_meta[0]['is_first']
+
         if is_first:
+            scale_factor = 1
+            self.frame_idx = 0
             # extract feature maps
             x, feat_res0 = self.extract_feat(img)
             self.key_feat_maps = x
             self.key_feat_res0 = feat_res0
+            self.key_img = img  # last full img
+
+            # Get initial state
+            self.feat_self_key = resize(self.get_self_feat(img), scale_factor=self.scale_factors[-1])
+
         else:
-            self.key_feat_maps, self.key_feat_res0 = self.extract_feat(self.prev_img)
-            size = (int(360 * np.sqrt(1)), int(640 * np.sqrt(1)))
-            flow_output = self.flow_head(self.resize(self.prev_img, size), self.resize(img, size))
-            # feature warping
-            feat_stride = [4, 8, 16, 32, 64]
-            x = [warp(feat_map, flow_output/stride) for (feat_map, stride) in zip(self.key_feat_maps, feat_stride)]
-        self.prev_img = img
-        #
-        # save feature maps of key frame.
-        if key_frame:
-            self.key_feat_maps = x
-            self.key_feat_res0 = feat_res0
+            self.frame_idx += 1
+            # Get current state.
+            current_low_img = resize(img, scale_factor=self.scale_factors[-1])
+            self.feat_self = self.get_self_feat(current_low_img)
+            self.feat_diff = self.feat_self_key - self.feat_self
+            self.state = [self.feat_self, self.feat_diff, self.feat_FAR, self.feat_history]
 
-        feat_maps = list(x)
+            # Get Scale Factor
+            try:
+                action = self.rl_net(self.state)
+                scale_factor = self.scale_factors[trans_action(action)]
+            except:
+                action = 0
+                scale_factor = 1
 
+            if scale_factor in [1]:
+                # extract feature maps
+                x, feat_res0 = self.extract_feat(img)
+                self.key_feat_maps = x
+                self.key_feat_res0 = feat_res0
+                self.key_img = img  # last full img
+
+                # Get initial state
+                self.feat_self_key = resize(self.get_self_feat(img), scale_factor=self.scale_factors[-1])
+                self.feat_FAR = (self.feat_FAR * self.frame_idx + 1) / (self.frame_idx + 1)
+
+            else:
+                current_img = resize(img, scale_factor=scale_factor)
+                size_full = self.key_img.shape
+                size_current = current_img.shape
+                if size_full[-1] > size_current[-1]:
+                    size = size_current[-2:]
+                    full_img = self.resize(self.key_img, size)
+                else:
+                    size = size_full[-2:]
+                    full_img = self.key_img
+                    current_img = self.resize(current_img, size)
+
+                flow_outputs = self.flow_head(full_img, current_img)
+                # feature warping
+                feat_stride = [4, 8, 16, 32, 64]
+                x = [warp(feat_map, flow_outputs / stride) for (feat_map, stride) in zip(self.key_feat_maps, feat_stride)]
+
+            # 历史动作特征
+            self.feat_history[:-1] = self.feat_history[1:]
+            self.feat_history[-1] = action
+        # print(scale_factor)
         # get proposal list
         proposal_list = self.simple_test_rpn(
             x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
@@ -427,44 +513,11 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
         if not self.with_mask:
             return bbox_results
         else:
-            # get segmentation results using original net if current frame is key frame.
-            if key_frame:
-                segm_results = self.simple_test_mask(
+            segm_results = self.simple_test_mask(
                     x, img_meta, det_bboxes, det_labels,
                     rescale=rescale, det_obj_ids=det_obj_ids)
 
-                return bbox_results, segm_results
-
-            # get segmentation results using flownet and feature warping
-            # if current frame is not key frame.
-            else:
-                # Turn feature maps to certain size.
-                # (b, c, 48, 64) for feature map and (b, c, 96, 128) for resnet-50 layer0 feature.
-                current_feat_map = self.resize(feat_maps[0])
-                key_feat_map = self.resize(self.key_feat_maps[0])
-                key_feat_res0 = self.resize(self.key_feat_res0, size=(96, 128))
-                key_feat_res0 = torch.cat((key_feat_res0, key_feat_res0), 1)  # channel from 64 to 128
-
-                # get flow results
-                flow_output = self.flow_head(current_feat_map, [key_feat_res0, key_feat_map])
-                # print("max flow:{}\t min flow:{}".format(torch.max(flow_output), torch.min(flow_output)))
-
-                # visualization
-                # rgb_flow = self.flow_head.flow2rgb(20 * flow_output[0], max_value=20)
-                # to_save = (rgb_flow * 255).astype(np.uint8).transpose(1,2,0)
-                # mmcv.imwrite(to_save, '/home/ubuntu/code/fengda/MaskTrackRCNN/flow.jpg')
-
-                # feature warping
-                current_feat_warped = warp(key_feat_map, flow_output)
-
-                # rescale feature map
-                feat_maps[0] = self.resize(current_feat_warped, size=x[0].shape[-2:])
-
-                # get segmentation results
-                segm_results = self.simple_test_mask(
-                    tuple(feat_maps), img_meta, det_bboxes, det_labels,
-                    rescale=rescale, det_obj_ids=det_obj_ids)
-                return bbox_results, segm_results
+            return bbox_results, segm_results
 
     def aug_test(self, imgs, img_metas, rescale=False):
         """Test with augmentations.
@@ -500,3 +553,38 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
         """Resize feature map to certain size."""
         key_feature = torch.nn.functional.interpolate(feat_map, size, mode='bilinear', align_corners=True)
         return key_feature
+
+    def get_self_feat(self, input):
+        '''
+        :param self:
+        :param img_tensor: a tensor with size of batchsize * channels * height * weight
+        :return:
+        '''
+        model = self.res_model
+        model.eval()
+
+        x = input
+        x = model.conv1(x)
+        x = model.bn1(x)
+        x = model.relu(x)
+        x = model.maxpool(x)
+        x = model.layer1(x)
+        # print(x.size())
+
+        return x
+
+    def warp_feat(self, feat_maps, flow, img_size, feat_stride=(4, 8, 16, 32, 64), mode='warp'):
+        assert mode in ['warp', 'gather'], "Ensure mode in ['warp', 'gather']."
+        if len(flow.shape) != 4:
+            flow = flow.unsqueeze(0)
+        sizes = [(int(img_size[0]/stride), int(img_size[1]/stride)) for stride in feat_stride]
+        if feat_maps[0].shape[-2:] != sizes[0]:
+            feat_maps = [self.resize(feat, size) for (feat, size) in zip(feat_maps, sizes)]
+        if mode == 'warp':
+            x = [warp(feat_map, flow / stride) for (feat_map, stride) in zip(feat_maps, feat_stride)]
+            # flows = [self.resize(flow, size) for (size) in sizes]
+            # y = [gather_nd(feat_map, flow / stride) for (feat_map, flow, stride) in zip(feat_maps, flows, feat_stride)]
+        elif mode == 'gather':
+            flows = [self.resize(flow, size) for (size) in sizes]
+            x = [gather_nd(feat_map, flow / stride) for (feat_map, flow, stride) in zip(feat_maps, flows, feat_stride)]
+        return x

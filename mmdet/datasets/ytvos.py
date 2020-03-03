@@ -189,6 +189,7 @@ class YTVOSDataset(CustomDataset):
         vid_info = self.vid_infos[vid]
         # load image
         img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))
+        h_orig, w_orig, _ = img.shape
         basename = osp.basename(vid_info['filenames'][frame_id])
         _, ref_frame_id = self.sample_ref(idx)
         ref_img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][ref_frame_id]))
@@ -239,7 +240,8 @@ class YTVOSDataset(CustomDataset):
         img_scale = random_scale(self.img_scales)  # sample a scale
         img, img_shape, pad_shape, scale_factor = self.img_transform(
             img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
-        scale_factor = tuple(scale_factor)
+        if (type(scale_factor)) != float:
+            scale_factor = tuple(scale_factor)
         img = img.copy()
         ref_img, ref_img_shape, _, ref_scale_factor = self.img_transform(
             ref_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
@@ -259,9 +261,11 @@ class YTVOSDataset(CustomDataset):
             gt_bboxes_ignore = self.bbox_transform(gt_bboxes_ignore, img_shape,
                                                    scale_factor, flip)
         if self.with_mask:
-            if isinstance(scale_factor, tuple):
+            if w_orig > h_orig:
                 h, w = img_shape[0], img_shape[1]
                 _scale_factor = tuple([w, h, w, h])
+            else:
+                _scale_factor = scale_factor
             gt_masks = self.mask_transform(ann['masks'], pad_shape,
                                            _scale_factor, flip)
 
@@ -271,6 +275,7 @@ class YTVOSDataset(CustomDataset):
             img_shape=img_shape,
             pad_shape=pad_shape,
             scale_factor=scale_factor,
+            is_first=(frame_id == 0),
             flip=flip)
 
         data = dict(
@@ -308,6 +313,7 @@ class YTVOSDataset(CustomDataset):
                 pad_shape=pad_shape,
                 is_first=(frame_id == 0),
                 video_id=vid,
+                file_name=vid_info['filenames'][frame_id],
                 frame_id =frame_id,
                 scale_factor=scale_factor,
                 flip=flip)

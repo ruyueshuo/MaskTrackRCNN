@@ -308,15 +308,15 @@ class TwoStageDetectorFlow(BaseDetector, RPNTestMixin,
         is_first = img_meta[0]['is_first']
         if is_first:
             self.prev_img = img
-        # # extract feature maps
-        # x, feat_res0 = self.extract_feat(img)
-        #
-        # # save feature maps of key frame.
-        # if key_frame:
-        #     self.key_feat_maps = x
-        #     self.key_feat_res0 = feat_res0
-        #
-        # feat_maps = list(x)
+        # extract feature maps
+        x, feat_res0 = self.extract_feat(img)
+
+        # save feature maps of key frame.
+        if key_frame:
+            self.key_feat_maps = x
+            self.key_feat_res0 = feat_res0
+
+        feat_maps = list(x)
 
 
         # get proposal list

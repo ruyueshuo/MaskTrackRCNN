@@ -5,6 +5,9 @@
 # @File    : test_video_flow_test.py
 # @Software: PyCharm
 import argparse
+import traceback
+from tqdm import tqdm
+import numpy as np
 
 import torch
 import mmcv
@@ -16,60 +19,145 @@ from mmdet.core import results2json_videoseg, ytvos_eval
 from mmdet.datasets import build_dataloader
 from mmdet.models import build_detector, detectors
 
+from mmdet.models.decision_net.utils import *
 
-def single_test(model, data_loader, cfg, show=False, save_path=''):
+def single_test(model, data_loader, rl_model=None, show=False, save_path=''):
     model.eval()
     results = []
-    import numpy as np
-    avg_time = np.zeros((1, 4))
+    scales = []
     dataset = data_loader.dataset
     prog_bar = mmcv.ProgressBar(len(dataset))
     num = 0
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    last_full = dict()
+
     for i, data in enumerate(data_loader):
-        # The image is the key frame if it is the first frame of a video
-        # or every 5 frame.
-        # img_meta = data['img_meta'][0].data
-        # is_first = img_meta[0][0]['is_first']
-        # if is_first or num % 5 == 0:
-        #     key_frame = True
-        #     num = 1
-        # else:
-        #     key_frame = False
+        # if i == 0:
+        #     img1 = data['img']
+        #     continue
+        # if i == 1:
+        #     img2 = data['img']
         #
-        #     # resize image according to scale factor.
-        #     scale_factor = 0.5
-        #     img = torch.nn.functional.interpolate(data['img'][0], scale_factor=scale_factor, mode='bilinear', align_corners=True)
-        #     device = img.device
-        #     img_np = np.transpose(img.squeeze().numpy(), (1, 2, 0))
+        # flow_network_data = torch.load("/home/ubuntu/code/fengda/MaskTrackRCNN/pretrained_models/flownetc_EPE1.766.tar")
+        # print("=> using pre-trained model '{}'".format(flow_network_data['arch']))
+        # from mmdet.models.flow_heads import FlowNetC, flownetc
+        # flow_model = FlowNetC(batchNorm=False)
+        # flow_model.load_state_dict(flow_network_data['state_dict'])
+        # # flow_model = models.__dict__[flow_network_data['arch']](flow_network_data).cuda()
+        # flow_model.cuda()
+        # flow_model.eval()
+        # flow_outputs2 = flow_model(img1[0].cuda(), img2[0].cuda())
         #
-        #     # The size of last feature map is 1/32(specially for resnet50) of the original image,
-        #     # Impad to ensure that the original image size is multiple of 32.
-        #     img_np = mmcv.impad_to_multiple(img_np, cfg.data.test.size_divisor)
-        #     data['img'][0]= torch.from_numpy(np.transpose(img_np, (2, 0, 1))).unsqueeze(0).to(device)
-        #
-        #     # change image meta info according to scale factor change.
-        #     img_meta[0][0]['img_shape'] = (int(img_meta[0][0]['img_shape'][0] * scale_factor),
-        #                                 int(img_meta[0][0]['img_shape'][1] * scale_factor), 3)
-        #     img_meta[0][0]['pad_shape'] = img_np.shape
-        #     img_meta[0][0]['scale_factor'] = img_meta[0][0]['scale_factor'] * scale_factor
-        #
-        #     num += 1
+        # f_model = FlowNetC(checkpoint="/home/ubuntu/code/fengda/MaskTrackRCNN/pretrained_models/flownetc_EPE1.766.tar")
+        # f_model.cuda()
+        # flow_outputs3 = f_model(img1[0].cuda(), img2[0].cuda())
+        # from mmdet.models.flow_heads.visualization import plot_flow
+        # plot_flow(flow_outputs3[0], 'test.jpg')
+        # data['img'] = data['img'][0]
+        # data['img_meta'] = data['img_meta'][0].data[0]
+        is_first = data['img_meta'][0].data[0][0]['is_first']
 
-        with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+        if is_first:
+            # Full resolution if it is the first frame of the video.
+            scale_facotr = 1
+            num = 1
 
+            def state_reset():
+                """Reset Features for states."""
+                feat_self = get_self_feat(model, data['img'])
+                feat_diff = torch.zeros_like(feat_self)
+                feat_FAR = torch.tensor([0.]).cuda()
+                feat_history = torch.zeros([10]).cuda()
+
+                return [feat_diff, feat_self, feat_FAR, feat_history]
+
+            state = state_reset()
+        else:
+            # If RL model is available, resolution is decided by rl model.
+            if rl_model:
+                def state_step(s, a):
+
+                    return state
+                state = state_step(state_prev, action_prev)
+                scale_facotr = rl_model(state)
+            # Or resolution is decided manually. e.g. One full resolution frame for every five frames.
+            else:
+                if num % 2 == 0:
+                    scale_facotr = 1
+                else:
+                    scale_facotr = 0.5
+                num += 1
+
+        """
+        # Test
+        if is_first:
+            with torch.no_grad():
+                result = model(return_loss=False, rescale=True, **data)
+            last_data = data
+            last_full['img'] = data['img'][0]
+            last_full['feat_map_last'] = result[2]
+        else:
+            # scale_facotr = 0.5
+            from mmdet.models.decision_net.utils import get_low_data
+            from copy import deepcopy
+            # with torch.no_grad():
+            #     result_f = model(return_loss=False, rescale=True, **last_data)
+            # last_full['img'] = last_data['img'][0]
+            # last_full['feat_map_last'] = result_f[2]
+
+            low_data = get_low_data(deepcopy(data), scale_facotr, size_divisor=32, is_train=False)
+            with torch.no_grad():
+                result = model(return_loss=False, rescale=True, key_frame=last_full, **low_data)
+            # last_data = data
+        """
+
+        if scale_facotr == 1:
+            with torch.no_grad():
+                result = model(return_loss=False, rescale=True, **data)
+            last_full['img'] = data['img'][0]
+            last_full['feat_map_last'] = result[2]
+        else:
+            # resize data
+            from mmdet.models.decision_net.utils import get_low_data
+            from copy import deepcopy
+            low_data = get_low_data(deepcopy(data), scale_facotr, size_divisor=32, is_train=False)
+            with torch.no_grad():
+                result = model(return_loss=False, rescale=True, key_frame=last_full, **low_data)
+
+            # # Check whether need to get higher resolution.
+            # bboxes = result[0]
+            # thr = 0.25
+            # if len(bboxes) == 0:
+            #     scale_facotr = 1
+            # else:
+            #     for key, val in bboxes.items():
+            #         if min(val['bbox'][:-1]) < thr:
+            #         # if min(bboxes[:-1]) < thr:
+            #             scale_facotr = 1
+            #         break
+            # if scale_facotr == 1:
+            #     with torch.no_grad():
+            #         result = model(return_loss=False, rescale=True, **data)
+            #     last_full['img_last_full'] = data['img']
+            #     last_full['feat_last_full'] = result[2]
+
+        print(scale_facotr)
+        result = result[0:2]
         results.append(result)
-        show = False
+
+        show = True
         if show:
             model.module.show_result(data, result, dataset.img_norm_cfg,
                                      dataset=dataset.CLASSES,
                                      save_vis=True,
                                      save_path=save_path,
+                                     rescale=True,
                                      is_video=True)
 
         batch_size = data['img'][0].size(0)
         for _ in range(batch_size):
             prog_bar.update()
+
     return results
 
 
@@ -82,10 +170,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description='MMDet test detector')
     parser.add_argument('--config', default="../configs/masktrack_rcnn_r50_fpn_1x_flow_youtubevos.py",
                         help='test config file path')
-    parser.add_argument('--checkpoint', default="../results/baseline/epoch_12.pth", help='checkpoint file')
+    parser.add_argument('--checkpoint', default="../results/20200225-125037/epoch_11.pth", help='checkpoint file')
     parser.add_argument('--checkpointflow', default="../pretrained_models/flownetc_EPE1.766.tar", help='checkpoint file')
     parser.add_argument(
-        '--save_path', default="/home/ubuntu/datasets/YT-VIS/results/",
+        '--save_path', default="/home/ubuntu/datasets/YT-VIS/results/train-flow20-before-det/",
         type=str,
         help='path to save visual result')
     parser.add_argument(
@@ -102,7 +190,7 @@ def parse_args():
                         help='whether to load existing result')
     parser.add_argument(
         '--eval',
-        default=['bbox', 'segm'],
+        default=['segm'],
         type=str,
         nargs='+',
         choices=['bbox', 'segm'],
@@ -112,14 +200,19 @@ def parse_args():
     args = parser.parse_args()
 
     import os
-    args.save_path = os.path.dirname(args.checkpoint) + '/'
+    # args.save_path = os.path.dirname(args.checkpoint) + '/'
+    # args.save_path = '/home/ubuntu/code/fengda/MaskTrackRCNN/results/test/flow/c71f30d7b6/full/'
+    if not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
 
     return args
 
 
 def main():
     import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+    os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     args = parse_args()
     args.out = args.save_path + 'result_test.pkl'
     if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
@@ -133,22 +226,6 @@ def main():
     cfg.model.pretrained = None
     cfg.data.test.test_mode = True
 
-    cfg_test = cfg.data.test
-    file_name = '0043f083b5'
-    cfg_test.ann_file = cfg.data_root + 'train/Annotations/{}/{}_annotations.json'.format(file_name, file_name)
-    cfg_test.img_prefix =cfg.data_root + 'train/JPEGImages/'
-    # cfg_test.img_prefix =cfg.data_root + 'train/JPEGImages/{}'.format(file_name)
-    dataset = obj_from_dict(cfg_test, datasets, dict(test_mode=True))
-    data_loader = build_dataloader(
-        dataset,
-        imgs_per_gpu=1,
-        workers_per_gpu=cfg.data.workers_per_gpu,
-        num_gpus=1,
-        dist=False,
-        shuffle=False)
-    for i, data in enumerate(data_loader):
-        print(i)
-        print(data)
     # get dataset
     dataset = obj_from_dict(cfg.data.test, datasets, dict(test_mode=True))
 
@@ -157,10 +234,10 @@ def main():
     model = build_detector(
         cfg.model, train_cfg=None, test_cfg=cfg.test_cfg)
     load_checkpoint(model, args.checkpoint)
+    # device = torch.device("cuda")
+    # model.to(device)
+    model.load_flow()
     model = MMDataParallel(model, device_ids=[0])
-
-    # model_flow = FlowNetCHead()
-    # load_checkpoint(model_flow, args.checkpointflow)
 
     data_loader = build_dataloader(
         dataset,
@@ -173,26 +250,64 @@ def main():
         outputs = mmcv.load(args.out)
 
     else:
+        outputs = single_test(model, data_loader, show=args.show, save_path=args.save_path)
+
+        if args.out:
+            if not args.load_result:
+                print('writing results to {}'.format(args.out))
+
+                mmcv.dump(outputs, args.out)
+            eval_types = args.eval
+            if eval_types:
+                print('Starting evaluate {}'.format(' and '.join(eval_types)))
+                if not isinstance(outputs[0], dict):
+                    result_file = args.out + '.json'
+                    results2json_videoseg(dataset, outputs, result_file)
+                    ytvos_eval(result_file, eval_types, dataset.ytvos)
+                else:
+                    NotImplemented
         # test
-        outputs = single_test(model, data_loader, cfg, args.show, save_path=args.save_path)
+        Test = False
+        if Test:
+            import pandas as pd
+            from mmdet.models.decision_net.utils import modify_cfg, get_dataloader
+            from mmdet.datasets.utils import get_dataset
+            # val_videos = list(pd.read_csv('train.csv').video_name)
+            val_videos = ['2c11fedca8']
+            from tqdm import tqdm
+            for video_name in tqdm(val_videos):
+                # get data loader of the selected video
+                cfg_test = modify_cfg(cfg, video_name)
+                ann_file = cfg_test.ann_file
+                # self.dataset = obj_from_dict(self.cfg_test, datasets, dict(test_mode=True))
+                try:
+                    dataset = obj_from_dict(cfg_test, datasets, dict(test_mode=True))
+                    print('video name: {}.\t len of dataset:{}.'.format(video_name, len(dataset)))
+                    data_loader = build_dataloader(dataset, imgs_per_gpu=1, workers_per_gpu=0, num_gpus=1, dist=False, shuffle=False)
 
-    if args.out:
-        if not args.load_result:
-            print('writing results to {}'.format(args.out))
+                    outputs = single_test(model, data_loader, cfg, args.show, save_path=os.path.join(args.save_path, video_name))
+                except:
+                    print(traceback.print_exc())
+                    continue
+                # break
+                if args.out:
+                    if not args.load_result:
+                        print('writing results to {}'.format(args.out))
 
-            mmcv.dump(outputs, args.out)
-        eval_types = args.eval
-        if eval_types:
-            print('Starting evaluate {}'.format(' and '.join(eval_types)))
-            if not isinstance(outputs[0], dict):
-                result_file = args.out + '.json'
-                results2json_videoseg(dataset, outputs, result_file)
-                ytvos_eval(result_file, eval_types, dataset.ytvos)
-            else:
-                NotImplemented
+                        mmcv.dump(outputs, args.out)
+                    eval_types = args.eval
+                    if eval_types:
+                        print('Starting evaluate {}'.format(' and '.join(eval_types)))
+                        if not isinstance(outputs[0], dict):
+                            result_file = args.out + '.json'
+                            results2json_videoseg(dataset, outputs, result_file)
+                            ytvos_eval(result_file, eval_types, dataset.ytvos)
+                        else:
+                            NotImplemented
 
 
-def seperate_annotations():
+def separate_annotations():
+    """Separate train or validation annotations to single video annotation."""
     data_root = '/home/ubuntu/datasets/YT-VIS/'
     ann_file = data_root + 'annotations/instances_train_sub.json'
     import json
@@ -235,52 +350,10 @@ def seperate_annotations():
 
 
 if __name__ == '__main__':
-    # import json
-    # ann_file = '/home/ubuntu/code/fengda/MaskTrackRCNN/results/result_test.pkl.json'
-    # with open(ann_file, 'r') as f:
-    #     ann = json.load(f)
-    seperate_annotations()
-    # # get dataset
-    # dataset = obj_from_dict(cfg.data.test, datasets, dict(test_mode=True))
-    # data_root = '/home/ubuntu/datasets/YT-VIS/'
-    # ann_file = data_root + 'annotations/instances_train_sub.json'
-    # import json
-    # with open(ann_file, 'r') as f:
-    #     ann = json.load(f)
-    #     # ann['videos'] = ann['videos'][15]
-    #     # video_id = [0]
-    #
-    #     for id in range(len(ann['videos'])):
-    #         videos = []
-    #         anns = []
-    #         videos.append(ann['videos'][id])
-    #         anns.append(ann['annotations'][id])
-    #
-    #         file_name = videos[0]['file_names'][0].split('/')[0]
-    #
-    #         ann_new = dict()
-    #         ann_new['info'] = ann['info']
-    #         ann_new['licenses'] = ann['licenses']
-    #         ann_new['categories'] = ann['categories']
-    #         ann_new['videos'] = videos
-    #         ann_new['annotations'] = anns
-    #
-    #         with open(data_root + 'train/Annotations/{}/{}_annotations.json'.format(file_name, file_name), 'w') as f:
-    #             json.dump(ann_new, f, ensure_ascii=False)
+    # videos_list = separate_annos(mode='train')
+    # with open('valid.txt', 'w') as f:
+    #     for v in videos_list:
+    #         f.writelines(v)
+    #         f.writelines("\n")
 
-        # ann['videos'] = videos
-        # ann['annotations'] = anns
-        # videos = ann['videos'][video_id]
-        # ann['videos'] = []
-        # ann['videos'].append(videos)
-        # anns = ann['annotations'][video_id]
-        # ann['annotations'] = []
-        # ann['annotations'].append(anns)
-
-    # with open(data_root + 'annotations/instances_test_sub.json', 'w') as f:
-    #     json.dump(ann, f, ensure_ascii=False)
-
-    # from mmdet.models.mask_heads.res5_mask_head import ResMaskHead
-    # model = ResMaskHead()
-    # print(model)
     main()
