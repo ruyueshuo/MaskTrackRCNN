@@ -86,33 +86,40 @@ def get_dataloader(dataset):
     return data_loader
 
 
-def get_VIS_data(loader, index, size=(384, 640)):
-    # index = 9
-    for i, data in enumerate(loader):
-        if i == index:
-            # print(i)
-            # DC objects to GPU tensor.
-            data['img'] = data['img'].data[0].cuda()
-            data['ref_img'] = data['ref_img'].data[0].cuda()
-            if data['img'].shape[-2:] != size:
-                data['img'] = nn.functional.interpolate(data['img'], size, mode='bilinear', align_corners=True)
-                data['ref_img'] = nn.functional.interpolate(data['ref_img'], size, mode='bilinear', align_corners=True)
-            data['img_meta'] = data['img_meta'].data[0]
-            data['gt_bboxes'] = data['gt_bboxes'].data[0]
-            data['ref_bboxes'] = data['ref_bboxes'].data[0]
-            data['gt_labels'] = data['gt_labels'].data[0]
-            data['gt_pids'] = data['gt_pids'].data[0]
-            data['gt_bboxes_ignore'] = data['gt_bboxes_ignore'].data[0]
-            data['gt_masks'] = data['gt_masks'].data[0]
+def get_VIS_data(loader, index, dataset=None, size=(384, 640)):
+    data = dataset[index]
+    return container_to_tensor(data, size=size)
 
-            data['gt_bboxes'][0] = data['gt_bboxes'][0].cuda()
-            data['ref_bboxes'][0] = data['ref_bboxes'][0].cuda()
-            data['gt_labels'][0] = data['gt_labels'][0].cuda()
-            data['gt_pids'][0] = data['gt_pids'][0].cuda()
-            data['gt_bboxes_ignore'][0] = data['gt_bboxes_ignore'][0].cuda()
-            return data
 
-    raise LookupError
+def container_to_tensor(data, size):
+    data['img'] = data['img'].data.cuda()
+    data['ref_img'] = data['ref_img'].data.cuda()
+    if len(data['img'].shape) != 4:
+        data['img'] = data['img'].unsqueeze(0)
+    if len(data['ref_img'].shape) != 4:
+        data['ref_img'] = data['ref_img'].unsqueeze(0)
+
+    if data['img'].shape[-2:] != size:
+        data['img'] = nn.functional.interpolate(data['img'], size, mode='bilinear', align_corners=True)
+        data['ref_img'] = nn.functional.interpolate(data['ref_img'], size, mode='bilinear', align_corners=True)
+
+    data['img_meta'] = data['img_meta'].data
+    data['gt_bboxes'] = data['gt_bboxes'].data.cuda()
+    data['ref_bboxes'] = data['ref_bboxes'].data.cuda()
+    data['gt_labels'] = data['gt_labels'].data.cuda()
+    data['gt_pids'] = data['gt_pids'].data.cuda()
+    data['gt_bboxes_ignore'] = data['gt_bboxes_ignore'].data.cuda()
+    data['gt_masks'] = [data['gt_masks'].data]
+
+    img_meta = []
+    img_meta.append(data['img_meta'])
+    data['img_meta'] = img_meta
+    data['gt_bboxes'] = [data['gt_bboxes']]
+    data['ref_bboxes'] = [data['ref_bboxes']]
+    data['gt_labels'] = [data['gt_labels']]
+    data['gt_pids'] = [data['gt_pids']]
+    data['gt_bboxes_ignore'] = [data['gt_bboxes_ignore']]
+    return data
 
 
 def get_low_data(data_current_full, scale_facotr, size_divisor=32, is_train=True):

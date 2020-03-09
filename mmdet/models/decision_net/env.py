@@ -34,7 +34,7 @@ class DecisionEnv(object):
                  model,
                  cfg,
                  videos=None,
-                 res_model=None,
+                 # res_model=None,
                  is_train=True):
 
         self.model = model  # task model
@@ -46,11 +46,6 @@ class DecisionEnv(object):
             self.videos = os.listdir(data_path)  # video names
         self.videos.sort()
         self.is_train = is_train  # train or validation
-        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        if res_model is None:
-            self.res_model = models.resnet50(pretrained=True).to(self.device)
-        else:
-            self.res_model = res_model
 
         self.state = None
         self.rewards = None
@@ -80,10 +75,11 @@ class DecisionEnv(object):
         self.video_annotation = None
 
         self.actions = [1, 1/2, 1/3, 1/4]
-        self.speed_rewards = [0.1, 0.2, 0.3, 0.4]
+        self.speed_rewards = [0., 0.2, 0.3, 0.4]
         # self.device = torch.device("cuda")
-        self.FAR_thr = torch.tensor([0.8]).cuda()
+        self.FAR_thr = torch.tensor([0.]).cuda()
         self.feat_size = (24, 40)  # feature size
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     def _state_reset(self):
         """Reset Features for states."""
@@ -92,10 +88,18 @@ class DecisionEnv(object):
         self.feat_diff = torch.zeros_like(self.feat_self)
         self.feat_FAR = torch.tensor([0.]).cuda()
         self.feat_history = torch.zeros([10]).cuda()
-
         self.state = [self.feat_diff, self.feat_self, self.feat_FAR, self.feat_history]
+        # self.state = [self.feat_diff, self.feat_self, self.feat_history]
 
     def reset(self, index=0):
+        # if self.is_train:
+        #     dataset = get_dataset(self.cfg.data.train)
+        # else:
+        #     dataset = get_dataset(self.cfg.data.val)
+        # # prepare data loaders
+        # data_loaders = [build_dataloader(dataset, self.cfg.data.imgs_per_gpu, self.cfg.data.workers_per_gpu, 1, dist=False)]
+
+        # Build data loader by each video.
         if self.is_train:
             # Randomly select a video from train list
             video_name = random.sample(self.videos, 1)[0]
@@ -110,7 +114,6 @@ class DecisionEnv(object):
         self.dataset = get_dataset(self.cfg_test)
         print('video name: {}.\t len of dataset{}. '.format(video_name, len(self.dataset)))
         self.data_loader = get_dataloader(self.dataset)
-
         if self.is_train:
             # random choose a start frame, at list 10 frames to run.
             if len(self.data_loader) <= 10:
@@ -120,8 +123,9 @@ class DecisionEnv(object):
         else:
             # start from the first frame.
             self.start_frame = 0
+
         self.idx_frame = 0
-        self.data_current_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame)
+        self.data_current_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame, dataset=self.dataset)
         self.data_last_full = self.data_current_full
         self.feat_last_full = self.get_self_feat(self.data_current_full['img'])
 
@@ -137,13 +141,17 @@ class DecisionEnv(object):
         self.idx_frame += 1
         if a in [0]:
             # 动作选取为高清图片时， full_img和feat_FAR需要相应更改。
-            self.data_last_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame - 1)
-            self.feat_FAR = (self.feat_FAR * self.idx_frame + 1) / (self.idx_frame + 1)
+            self.data_last_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame - 1, dataset=self.dataset)
+            # self.feat_FAR = (self.feat_FAR * self.idx_frame + 1) / (self.idx_frame + 1)
+            self.feat_FAR = torch.tensor([0.]).cuda()
             self.feat_last_full = self.get_self_feat(self.data_last_full['img'])
         else:
-            self.feat_FAR = (self.feat_FAR * self.idx_frame + 0) / (self.idx_frame + 1)
+            # self.feat_FAR = (self.feat_FAR * self.idx_frame + 0) / (self.idx_frame + 1)
+            self.feat_FAR += 0.05
+            if self.feat_FAR > 1:
+                self.feat_FAR = torch.tensor([1.]).cuda()
 
-        self.data_current_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame)
+        self.data_current_full = get_VIS_data(self.data_loader, self.start_frame + self.idx_frame, dataset=self.dataset)
         self.data_current_low = get_low_data(copy.deepcopy(self.data_current_full), scale_facotr=self.actions[-1])
         self.data_current_a3 = self.data_current_low.copy()
         self.data_current_a2 = get_low_data(copy.deepcopy(self.data_current_full), scale_facotr=self.actions[2])
@@ -158,6 +166,7 @@ class DecisionEnv(object):
         self.feat_history[-2:] = torch.from_numpy(one_hot(a)).to(self.device)
 
         self.state = [self.feat_diff, self.feat_self, self.feat_FAR, self.feat_history]
+        # self.state = [self.feat_diff, self.feat_self, self.feat_history]
         return self.state
 
     def _get_reward(self, a, show=False):
@@ -165,19 +174,21 @@ class DecisionEnv(object):
         low resolution. Calculate the loss of full resolution and low resolution image data, return reward."""
         with torch.no_grad():
             loss_full, feat_map = self.model(return_loss=True, key_frame=None, **self.data_current_full)
+            if self.feat_map_last is None:
+                return 0, feat_map
             key_feat = self.data_last_full
             key_feat['feat_map_last'] = self.feat_map_last
-            loss_low3, _ = self.model(return_loss=True, key_frame=None, **self.data_current_a3)
-            loss_low2, _ = self.model(return_loss=True, key_frame=None, **self.data_current_a2)
-            loss_low1, _ = self.model(return_loss=True, key_frame=None, **self.data_current_a1)
+            loss_low3, _ = self.model(return_loss=True, key_frame=key_feat, **self.data_current_a3)
+            loss_low2, _ = self.model(return_loss=True, key_frame=key_feat, **self.data_current_a2)
+            loss_low1, _ = self.model(return_loss=True, key_frame=key_feat, **self.data_current_a1)
 
             # 去掉match loss\loss_reg\loss_cls
-            loss_f = loss_full['loss_mask']
-            loss_l3 = loss_low3['loss_mask']
-            loss_l2 = loss_low2['loss_mask']
-            loss_l1 = loss_low1['loss_mask']
-            print("loss_f:{},\tloss_l1:{},\tloss_l2:{},\tloss_l3:{}"
-                  .format(loss_f.item(), loss_l1.item(), loss_l2.item(), loss_l3.item()))
+            loss_f = loss_full['loss_mask'] + loss_full['loss_cls'] + loss_full['loss_reg']
+            loss_l3 = loss_low3['loss_mask'] + loss_low3['loss_cls'] + loss_low3['loss_reg']
+            loss_l2 = loss_low2['loss_mask'] + loss_low2['loss_cls'] + loss_low2['loss_reg']
+            loss_l1 = loss_low1['loss_mask'] + loss_low1['loss_cls'] + loss_low1['loss_reg']
+            # print("loss_f:{},\tloss_l1:{},\tloss_l2:{},\tloss_l3:{}"
+            #       .format(loss_f.item(), loss_l1.item(), loss_l2.item(), loss_l3.item()))
 
             loss = [loss_f.item(), loss_l1.item(), loss_l2.item(), loss_l3.item()]
             r = min(loss) - loss[a] + self.speed_rewards[a]
@@ -213,7 +224,7 @@ class DecisionEnv(object):
             feat_map = None
 
         if a in [0]:
-            assert feat_map is not None, "Feature maps cannot be None when action is 1."
+            assert feat_map is not None, "Feature maps cannot be None when action is 0."
             self.feat_map_last = feat_map
         # if self.is_train:
         #     if self.feat_FAR > self.FAR_thr:

@@ -36,6 +36,10 @@ class BaseRL(nn.Module):
         pass
 
     @abstractmethod
+    def choose_action(self, state):
+        pass
+
+    @abstractmethod
     def learn(self):
         pass
 

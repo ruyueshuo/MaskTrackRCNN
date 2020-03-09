@@ -286,6 +286,18 @@ class DDPG(object):
 
         return loss, policy_loss
 
+    def learn(self):
+        for train_steps in range(10):
+            critic_loss, actor_loss = self.fit_batch()
+            # if critic_loss is not None and actor_loss is not None:
+            #     epoch_critic_losses.append(critic_loss.cpu().detach().numpy())
+            #     epoch_actor_losses.append(actor_loss.cpu().detach().numpy())
+            #
+            #     print("epoch_critic_losses_mean:{}".format(np.mean(epoch_critic_losses)))
+            #     print("epoch_actor_losses_mean:{}".format(np.mean(epoch_actor_losses)))
+            # Update the target networks using polyak averaging
+            self.update_target_networks()
+
 
 def fanin_init(size, fanin=None):
     fanin = fanin or size[0]
@@ -305,18 +317,25 @@ class ActorNet(nn.Module):
 
         super(ActorNet, self).__init__()
 
-        self.conv1 = nn.Conv2d(input_channel, 512, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(512)
+        self.conv1 = nn.Conv2d(input_channel, 256, kernel_size=3, stride=2, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(256)
         # self.conv2 = nn.Conv2d(128, 64, kernel_size=3, stride=2, padding=1, bias=False)
         # self.bn2 = nn.BatchNorm2d(64)
-
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.avgpool = nn.AvgPool2d(7, stride=1)
 
-        self.fc1 = nn.Linear(7680*4, 1024*2)
-        self.fc2 = nn.Linear(1024*2, 256)
-        self.fc3 = nn.Linear(256, 64)
-        self.fc4 = nn.Linear(64+11, num_outputs)
+        # Number of Linear input connections depends on output of conv2d layers
+        # and therefore the input image size, so compute it.
+        def conv2d_size_out(size, kernel_size=3, stride=2):
+            return (size - (kernel_size - 1) - 1) // stride + 1
+        # convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
+        # convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
+        # linear_input_size = convw * convh * 32
+
+        self.fc1 = nn.Linear(7680*2, 1024*4)
+        self.fc2 = nn.Linear(1024*4, 1024)
+        self.fc3 = nn.Linear(1024, 256)
+        self.fc4 = nn.Linear(256+1, num_outputs)
 
         # self.bn_fc1 = nn.BatchNorm1d(1024*2)
         # self.bn_fc2 = nn.BatchNorm1d(256)
@@ -357,19 +376,6 @@ class ActorNet(nn.Module):
                     nn.init.kaiming_normal_(m.weight)
                     # nn.init.xavier_uniform_(m.weight)
 
-            # for _module in [self.conv1, self.conv2, self.fc1, self.fc2, self.fc3, self.fc4]:
-            #     if self.activation in [self.relu, self.leakyrelu]:
-            #         nn.init.kaiming_normal_(_module.weight, mode='fan_in')
-            #     else:
-            #         nn.init.xavier_uniform_(_module.weight)
-            #
-            #     elif isinstance(_module, nn.BatchNorm2d):
-            #         _module.weight.data.fill_(1)
-            #         _module.bias.data.zero_()
-                # if _module not in [self.conv1, self.conv2]:
-                #     # _module.bias.fill_(0.01)
-                #     nn.init.constant_(_module.bias, 0)
-
     def forward(self, inputs):
         """mu, sigma_sq?"""
         # feat_diff = inputs[0]
@@ -377,16 +383,13 @@ class ActorNet(nn.Module):
         feat_FAR = inputs[2].clone().detach().reshape((-1, 1))
         feat_history = inputs[3].reshape(-1, 10)
         x = torch.cat((inputs[0], inputs[1]), 1)
-        y = torch.cat((feat_FAR, feat_history), 1)
+        # y = torch.cat((feat_FAR, feat_history), 1)
+        y = feat_FAR
         x = self.conv1(x)
         x = self.bn1(x)
         # if self.is_training:
         #     x = self.bn1(x)
         x = self.activation(x)
-        # x = self.conv2(x)
-        # if self.is_training:
-        #     x = self.bn2(x)
-        # x = self.relu(x)
         x = self.maxpool(x)
         x = x.view(x.size(0), -1)
         try:
@@ -397,7 +400,7 @@ class ActorNet(nn.Module):
         x = self.activation(self.fc3(x))
         x = torch.cat((x, y), 1)
         x = self.fc4(x)
-        x = self.sigmoid(x)
+        # x = self.sigmoid(x)
         # x = self.softmax(x)
 
         return x
