@@ -1,5 +1,6 @@
 import numpy as np
 import os.path as osp
+import os
 import random
 import mmcv
 from .custom import CustomDataset
@@ -10,13 +11,14 @@ from pycocotools.ytvos import YTVOS
 from mmcv.parallel import DataContainer as DC
 from .utils import to_tensor, random_scale
 
+
 class YTVOSDataset(CustomDataset):
-    CLASSES=('person','giant_panda','lizard','parrot','skateboard','sedan',
-        'ape','dog','snake','monkey','hand','rabbit','duck','cat','cow','fish',
-        'train','horse','turtle','bear','motorbike','giraffe','leopard',
-        'fox','deer','owl','surfboard','airplane','truck','zebra','tiger',
-        'elephant','snowboard','boat','shark','mouse','frog','eagle','earless_seal',
-        'tennis_racket')
+    CLASSES = ('person', 'giant_panda', 'lizard', 'parrot', 'skateboard', 'sedan',
+               'ape', 'dog', 'snake', 'monkey', 'hand', 'rabbit', 'duck', 'cat', 'cow', 'fish',
+               'train', 'horse', 'turtle', 'bear', 'motorbike', 'giraffe', 'leopard',
+               'fox', 'deer', 'owl', 'surfboard', 'airplane', 'truck', 'zebra', 'tiger',
+               'elephant', 'snowboard', 'boat', 'shark', 'mouse', 'frog', 'eagle', 'earless_seal',
+               'tennis_racket')
 
     def __init__(self,
                  ann_file,
@@ -34,17 +36,41 @@ class YTVOSDataset(CustomDataset):
                  extra_aug=None,
                  aug_ref_bbox_param=None,
                  resize_keep_ratio=True,
-                 test_mode=False):
+                 test_mode=False,
+                 every_frame=False,
+                 is_flow=False):
         # prefix of images path
         self.img_prefix = img_prefix
 
         # load annotations (and proposals)
         self.vid_infos = self.load_annotations(ann_file)
+
+        self.every_frame = every_frame
+        self.is_flow = is_flow
+
+        # Set indexes for data loading
         img_ids = []
+        img_ids_all = []
+        img_ids_pairs = []
         for idx, vid_info in enumerate(self.vid_infos):
-          for frame_id in range(len(vid_info['filenames'])):
-            img_ids.append((idx, frame_id))
+            vid_name = vid_info['filenames'][0].split('/')[0]
+            folder_path = osp.join(self.img_prefix, vid_name)
+            files = os.listdir(folder_path)
+            files.sort()
+            vid_info['filenames_all'] = [osp.join(vid_name, file) for file in files]
+            for _id in range(len(files)):
+                img_ids_all.append((idx, _id))
+                is_anno = vid_info['filenames_all'][_id] in vid_info['filenames']
+                if is_anno and _id > 0:  # having annotation and is not the first frame.
+                    key_id = _id - np.random.randint(1, min(10, _id))
+                    img_ids_pairs.append(((idx, key_id), (idx, _id)))
+            for frame_id in range(len(vid_info['filenames'])):
+                img_ids.append((idx, frame_id))
+
         self.img_ids = img_ids
+        self.img_ids_all = img_ids_all
+        self.img_ids_pairs = img_ids_pairs
+
         if proposal_file is not None:
             self.proposals = self.load_proposals(proposal_file)
         else:
@@ -52,7 +78,7 @@ class YTVOSDataset(CustomDataset):
         # filter images with no annotation during training
         if not test_mode:
             valid_inds = [i for i, (v, f) in enumerate(self.img_ids)
-                if len(self.get_ann_info(v, f)['bboxes'])]
+                          if len(self.get_ann_info(v, f)['bboxes'])]
             self.img_ids = [self.img_ids[i] for i in valid_inds]
 
         # (long_edge, short_edge) or [(long1, short1), (long2, short2), ...]
@@ -104,14 +130,23 @@ class YTVOSDataset(CustomDataset):
         self.resize_keep_ratio = resize_keep_ratio
 
     def __len__(self):
-        return len(self.img_ids)
-    
+        if self.every_frame:
+            return len(self.img_ids_all)
+        else:
+            return len(self.img_ids)
+
     def __getitem__(self, idx):
         if self.test_mode:
-            return self.prepare_test_img(self.img_ids[idx])
-        data = self.prepare_train_img(self.img_ids[idx])
+            if self.every_frame:
+                return self.prepare_test_img(self.img_ids_all[idx])
+            else:
+                return self.prepare_test_img(self.img_ids[idx])
+        if self.is_flow:
+            data = self.prepare_train_flow_img(self.img_ids_pairs[idx])
+        else:
+            data = self.prepare_train_img(self.img_ids[idx])
         return data
-    
+
     def load_annotations(self, ann_file):
         self.ytvos = YTVOS(ann_file)
         self.cat_ids = self.ytvos.getCatIds()
@@ -145,28 +180,29 @@ class YTVOSDataset(CustomDataset):
             vid_info = self.vid_infos[vid_id]
             if vid_info['width'] / vid_info['height'] > 1:
                 self.flag[i] = 1
+
     def bbox_aug(self, bbox, img_size):
         assert self.aug_ref_bbox_param is not None
         center_off = self.aug_ref_bbox_param[0]
         size_perturb = self.aug_ref_bbox_param[1]
-        
+
         n_bb = bbox.shape[0]
         # bbox center offset
-        center_offs = (2*np.random.rand(n_bb, 2) - 1) * center_off
+        center_offs = (2 * np.random.rand(n_bb, 2) - 1) * center_off
         # bbox resize ratios
-        resize_ratios = (2*np.random.rand(n_bb, 2) - 1) * size_perturb + 1
+        resize_ratios = (2 * np.random.rand(n_bb, 2) - 1) * size_perturb + 1
         # bbox: x1, y1, x2, y2
-        centers = (bbox[:,:2]+ bbox[:,2:])/2.
-        sizes = bbox[:,2:] - bbox[:,:2]
+        centers = (bbox[:, :2] + bbox[:, 2:]) / 2.
+        sizes = bbox[:, 2:] - bbox[:, :2]
         new_centers = centers + center_offs * sizes
         new_sizes = sizes * resize_ratios
-        new_x1y1 = new_centers - new_sizes/2.
-        new_x2y2 = new_centers + new_sizes/2.
-        c_min = [0,0]
+        new_x1y1 = new_centers - new_sizes / 2.
+        new_x2y2 = new_centers + new_sizes / 2.
+        c_min = [0, 0]
         c_max = [img_size[1], img_size[0]]
         new_x1y1 = np.clip(new_x1y1, c_min, c_max)
         new_x2y2 = np.clip(new_x2y2, c_min, c_max)
-        bbox = np.hstack((new_x1y1,new_x2y2)).astype(np.float32)
+        bbox = np.hstack((new_x1y1, new_x2y2)).astype(np.float32)
         return bbox
 
     def sample_ref(self, idx):
@@ -176,19 +212,138 @@ class YTVOSDataset(CustomDataset):
         sample_range = range(len(vid_info['filenames']))
         valid_samples = []
         for i in sample_range:
-          # check if the frame id is valid
-          ref_idx = (vid, i)
-          if i != frame_id and ref_idx in self.img_ids:
-              valid_samples.append(ref_idx)
+            # check if the frame id is valid
+            ref_idx = (vid, i)
+            if i != frame_id and ref_idx in self.img_ids:
+                valid_samples.append(ref_idx)
         assert len(valid_samples) > 0
         return random.choice(valid_samples)
 
+    def prepare_train_flow_img(self, idx):
+
+        # prepare a pair of image in a sequence
+        vid, key_frame_id = idx[0]
+        _, cur_frame_id = idx[1]
+        vid_info = self.vid_infos[vid]
+
+        # load image
+        key_img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][key_frame_id]))
+        cur_img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][cur_frame_id]))
+        h_orig, w_orig, _ = key_img.shape
+        basename = osp.basename(vid_info['filenames_all'][key_frame_id])
+
+        # load proposals if necessary
+        if self.proposals is not None:
+            proposals = self.proposals[idx][:self.num_max_proposals]
+            # TODO: Handle empty proposals properly. Currently images with
+            # no proposals are just ignored, but they can be used for
+            # training in concept.
+            if len(proposals) == 0:
+                return None
+            if not (proposals.shape[1] == 4 or proposals.shape[1] == 5):
+                raise AssertionError(
+                    'proposals should have shapes (n, 4) or (n, 5), '
+                    'but found {}'.format(proposals.shape))
+            if proposals.shape[1] == 5:
+                scores = proposals[:, 4, None]
+                proposals = proposals[:, :4]
+            else:
+                scores = None
+        ann_idx = vid_info['filenames'].index(vid_info['filenames_all'][cur_frame_id])
+        ann = self.get_ann_info(vid, ann_idx)
+        gt_bboxes = ann['bboxes']
+        gt_labels = ann['labels']
+        # ref_bboxes = ref_ann['bboxes']
+        # obj ids attribute does not exist in current annotation
+        # need to add it
+        # ref_ids = ref_ann['obj_ids']
+        # gt_ids = ann['obj_ids']
+        # compute matching of reference frame with current frame
+        # 0 denote there is no matching
+        # gt_pids = [ref_ids.index(i) + 1 if i in ref_ids else 0 for i in gt_ids]
+        if self.with_crowd:
+            gt_bboxes_ignore = ann['bboxes_ignore']
+
+        # skip the image if there is no valid gt bbox
+        if len(gt_bboxes) == 0:
+            return None
+
+        # extra augmentation
+        if self.extra_aug is not None:
+            cur_img, gt_bboxes, gt_labels = self.extra_aug(cur_img, gt_bboxes,
+                                                       gt_labels)
+
+        # apply transforms
+        flip = True if np.random.rand() < self.flip_ratio else False
+        img_scale = random_scale(self.img_scales)  # sample a scale
+        cur_img, img_shape, pad_shape, scale_factor = self.img_transform(
+            cur_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
+        if (type(scale_factor)) != float:
+            scale_factor = tuple(scale_factor)
+        cur_img = cur_img.copy()
+        key_img, key_img_shape, _, ref_scale_factor = self.img_transform(
+            key_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
+        key_img = key_img.copy()
+        if self.proposals is not None:
+            proposals = self.bbox_transform(proposals, img_shape, scale_factor,
+                                            flip)
+            proposals = np.hstack(
+                [proposals, scores]) if scores is not None else proposals
+        gt_bboxes = self.bbox_transform(gt_bboxes, img_shape, scale_factor,
+                                        flip)
+        # ref_bboxes = self.bbox_transform(ref_bboxes, ref_img_shape, ref_scale_factor,
+        #                                  flip)
+        # if self.aug_ref_bbox_param is not None:
+        #     ref_bboxes = self.bbox_aug(ref_bboxes, ref_img_shape)
+        if self.with_crowd:
+            gt_bboxes_ignore = self.bbox_transform(gt_bboxes_ignore, img_shape,
+                                                   scale_factor, flip)
+        if self.with_mask:
+            if w_orig > h_orig:
+                h, w = img_shape[0], img_shape[1]
+                _scale_factor = tuple([w, h, w, h])
+            else:
+                _scale_factor = scale_factor
+            gt_masks = self.mask_transform(ann['masks'], pad_shape,
+                                           _scale_factor, flip)
+
+        ori_shape = (vid_info['height'], vid_info['width'], 3)
+        img_meta = dict(
+            ori_shape=ori_shape,
+            img_shape=img_shape,
+            pad_shape=pad_shape,
+            scale_factor=scale_factor,
+            is_first=(cur_frame_id == 0),
+            flip=flip)
+
+        data = dict(
+            key_img=DC(to_tensor(key_img), stack=True),
+            cur_img=DC(to_tensor(cur_img), stack=True),
+            img_meta=DC(img_meta, cpu_only=True),
+            gt_bboxes=DC(to_tensor(gt_bboxes)),
+            # ref_bboxes=DC(to_tensor(ref_bboxes))
+        )
+        if self.proposals is not None:
+            data['proposals'] = DC(to_tensor(proposals))
+        if self.with_label:
+            data['gt_labels'] = DC(to_tensor(gt_labels))
+        # if self.with_track:
+        #     data['gt_pids'] = DC(to_tensor(gt_pids))
+        if self.with_crowd:
+            data['gt_bboxes_ignore'] = DC(to_tensor(gt_bboxes_ignore))
+        if self.with_mask:
+            data['gt_masks'] = DC(gt_masks, cpu_only=True)
+        return data
+
     def prepare_train_img(self, idx):
         # prepare a pair of image in a sequence
-        vid,  frame_id = idx
+        vid, frame_id = idx
         vid_info = self.vid_infos[vid]
         # load image
-        img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))
+        if self.is_flow or self.every_frame:
+            img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][frame_id]))
+        else:
+            img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))
         h_orig, w_orig, _ = img.shape
         basename = osp.basename(vid_info['filenames'][frame_id])
         _, ref_frame_id = self.sample_ref(idx)
@@ -222,7 +377,7 @@ class YTVOSDataset(CustomDataset):
         gt_ids = ann['obj_ids']
         # compute matching of reference frame with current frame
         # 0 denote there is no matching
-        gt_pids = [ref_ids.index(i)+1 if i in ref_ids else 0 for i in gt_ids]
+        gt_pids = [ref_ids.index(i) + 1 if i in ref_ids else 0 for i in gt_ids]
         if self.with_crowd:
             gt_bboxes_ignore = ann['bboxes_ignore']
 
@@ -254,7 +409,7 @@ class YTVOSDataset(CustomDataset):
         gt_bboxes = self.bbox_transform(gt_bboxes, img_shape, scale_factor,
                                         flip)
         ref_bboxes = self.bbox_transform(ref_bboxes, ref_img_shape, ref_scale_factor,
-                                          flip)
+                                         flip)
         if self.aug_ref_bbox_param is not None:
             ref_bboxes = self.bbox_aug(ref_bboxes, ref_img_shape)
         if self.with_crowd:
@@ -283,7 +438,7 @@ class YTVOSDataset(CustomDataset):
             ref_img=DC(to_tensor(ref_img), stack=True),
             img_meta=DC(img_meta, cpu_only=True),
             gt_bboxes=DC(to_tensor(gt_bboxes)),
-            ref_bboxes = DC(to_tensor(ref_bboxes))
+            ref_bboxes=DC(to_tensor(ref_bboxes))
         )
         if self.proposals is not None:
             data['proposals'] = DC(to_tensor(proposals))
@@ -296,14 +451,20 @@ class YTVOSDataset(CustomDataset):
         if self.with_mask:
             data['gt_masks'] = DC(gt_masks, cpu_only=True)
         return data
+
     def prepare_test_img(self, idx):
         """Prepare an image for testing (multi-scale and flipping)"""
         vid, frame_id = idx
         vid_info = self.vid_infos[vid]
         img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))
         proposal = None
+        is_anno = vid_info['filenames_all'][frame_id] in vid_info['filenames']
+        if self.every_frame:
+            file_name = vid_info['filenames_all'][frame_id]
+        else:
+            file_name = vid_info['filenames'][frame_id]
 
-        def prepare_single(img, frame_id, scale, flip, proposal=None):
+        def prepare_single(img, frame_id, scale, flip, file_name, proposal=None, is_anno=True):
             _img, img_shape, pad_shape, scale_factor = self.img_transform(
                 img, scale, flip, keep_ratio=self.resize_keep_ratio)
             _img = to_tensor(_img)
@@ -313,10 +474,11 @@ class YTVOSDataset(CustomDataset):
                 pad_shape=pad_shape,
                 is_first=(frame_id == 0),
                 video_id=vid,
-                file_name=vid_info['filenames'][frame_id],
-                frame_id =frame_id,
+                file_name=file_name,
+                frame_id=frame_id,
                 scale_factor=scale_factor,
-                flip=flip)
+                flip=flip,
+                is_anno=is_anno)
             if proposal is not None:
                 if proposal.shape[1] == 5:
                     score = proposal[:, 4, None]
@@ -337,13 +499,13 @@ class YTVOSDataset(CustomDataset):
         proposals = []
         for scale in self.img_scales:
             _img, _img_meta, _proposal = prepare_single(
-                img, frame_id, scale, False, proposal)
+                img, frame_id, scale, False, file_name, proposal, is_anno)
             imgs.append(_img)
             img_metas.append(DC(_img_meta, cpu_only=True))
             proposals.append(_proposal)
             if self.flip_ratio > 0:
                 _img, _img_meta, _proposal = prepare_single(
-                    img, scale, True, proposal)
+                    img, scale, True, file_name, proposal, is_anno)
                 imgs.append(_img)
                 img_metas.append(DC(_img_meta, cpu_only=True))
                 proposals.append(_proposal)
