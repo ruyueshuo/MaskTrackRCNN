@@ -67,6 +67,50 @@ def train_detector(model,
         _non_dist_train(model, dataset, cfg, validate=validate)
 
 
+def train_flownet(model,
+                   dataset,
+                   cfg,
+                   distributed=False,
+                   validate=False,
+                   logger=None):
+    if logger is None:
+        logger = get_root_logger(cfg.log_level)
+
+    # start training
+    # prepare data loaders
+    data_loaders = [
+        build_dataloader(
+            dataset,
+            cfg.data.imgs_per_gpu,
+            cfg.data.workers_per_gpu,
+            cfg.gpus,
+            dist=False)
+    ]
+
+    # put model on gpus
+    model = MMDataParallel(model, device_ids=range(cfg.gpus)).cuda()
+
+    # build runner
+    runner = Runner(model, batch_processor, cfg.optimizer, cfg.work_dir,
+                    cfg.log_level)
+    runner.register_training_hooks(cfg.lr_config, cfg.optimizer_config,
+                                   cfg.checkpoint_config, cfg.log_config)
+
+    # if cfg.resume_from:
+    #     runner.resume(cfg.resume_from)
+    # elif cfg.load_from:
+    #     runner.load_checkpoint(cfg.load_from)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+    # model.load_flow()
+    model.module.flow_head.train()
+    for param in model.module.flow_head.parameters():
+        param.requires_grad = True
+    # training
+    runner.run(data_loaders, cfg.workflow, cfg.total_epochs)
+
+
 def _dist_train(model, dataset, cfg, validate=False):
     # prepare data loaders
     data_loaders = [

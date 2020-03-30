@@ -52,22 +52,23 @@ model = dict(
         roi_layer=dict(type='RoIAlign', out_size=14, sample_num=2),
         out_channels=256,
         featmap_strides=[4, 8, 16, 32]),
-    # mask_head=dict(
-    #     type='FCNMaskHead',
-    #     num_convs=4,
-    #     in_channels=256,
-    #     conv_out_channels=256,
-    #     num_classes=41),
     mask_head=dict(
-        type='ResMaskHead',
+        type='FCNMaskHead',
         num_convs=4,
         in_channels=256,
         conv_out_channels=256,
         num_classes=41),
-    # flow_head=dict(
-    #     type='FlowNetC',
-    #     checkpoint="../pretrained_models/flownetc_EPE1.766.tar"
-    # )
+    # mask_head=dict(
+    #     type='ResMaskHead',
+    #     num_convs=4,
+    #     in_channels=256,
+    #     conv_out_channels=256,
+    #     num_classes=41),
+    flow_head=dict(
+        type='FlowNetC',
+        batchNorm=False,
+        checkpoint="../pretrained_models/flownetc_EPE1.766.tar"
+    )
 )
 # model training and testing settings
 train_cfg = dict(
@@ -125,8 +126,8 @@ img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
     # mean = [104.805, 110.16, 114.75], std = [255, 255, 255], to_rgb = True)
 data = dict(
-    imgs_per_gpu=8,
-    workers_per_gpu=0,
+    imgs_per_gpu=6,
+    workers_per_gpu=6,
     train=dict(
         type=dataset_type,
         ann_file=data_root + 'annotations/instances_train_sub.json',
@@ -138,12 +139,14 @@ data = dict(
         with_mask=True,
         with_crowd=True,
         with_label=True,
-        with_track=True),
+        with_track=True,
+        is_flow=True,
+        flow_test=False),
     val=dict(
         type=dataset_type,
         ann_file=data_root + 'annotations/instances_train_valid_annotations.json',
         img_prefix=data_root + 'train/JPEGImages',
-        img_scale=(640, 360),
+        img_scale=(1280, 640),
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
         flip_ratio=0,
@@ -154,18 +157,21 @@ data = dict(
         resize_keep_ratio=True),
     test=dict(
         type=dataset_type,
-        ann_file=data_root + 'annotations/instances_train_valid_annotations.json',
-        img_prefix=data_root + 'train/JPEGImages',
-        img_scale=(640, 360),
+        ann_file=data_root + 'annotations/instances_valid_sub.json',
+        img_prefix=data_root + 'valid/JPEGImages',
+        img_scale=(1280, 720),
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
         flip_ratio=0,
         with_mask=False,
         with_label=False,
         test_mode=True,
-        with_track=True))
+        with_track=True,
+        # every_frame=True
+    ))
 # optimizer
-optimizer = dict(type='SGD', lr=0.005, momentum=0.9, weight_decay=0.0001)
+optimizer = dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0001)
+# optimizer = dict(type='Adam', lr=0.002, betas=(0.9, 0.999), weight_decay=0.0001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -173,7 +179,8 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=500,
     warmup_ratio=1.0 / 3,
-    step=[8, 11])
+    step=[3, 5, 7, 9],
+    gamma=0.5)
 checkpoint_config = dict(interval=1)
 # yapf:disable
 log_config = dict(
@@ -184,7 +191,7 @@ log_config = dict(
     ])
 # yapf:enable
 # runtime settings
-total_epochs = 16
+total_epochs = 10
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = './work_dirs/masktrack_rcnn_r50_fpn_1x_youtubevos'

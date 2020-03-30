@@ -8,12 +8,17 @@ from mmdet.datasets.eval.ytvoseval import YTVOSeval
 from .recall import eval_recalls
 
 
-def ytvos_eval(result_file, result_types, ytvos, max_dets=(100, 300, 1000)):
+def ytvos_eval(result_file, result_types, ytvos, max_dets=(100, 300, 1000), frame_id=None, show=False):
 
     if mmcv.is_str(ytvos):
         ytvos = YTVOS(ytvos)
     assert isinstance(ytvos, YTVOS)
 
+    if frame_id is not None:
+        anns = ytvos.anns
+        for key, item in anns.items():
+            anns[key]['segmentations'] = [anns[key]['segmentations'][frame_id]]
+        ytvos.anns = anns
     if len(ytvos.anns) == 0:
         print("Annotations does not exist")
         return
@@ -30,7 +35,9 @@ def ytvos_eval(result_file, result_types, ytvos, max_dets=(100, 300, 1000)):
             ytvosEval.params.maxDets = list(max_dets)
         ytvosEval.evaluate()
         ytvosEval.accumulate()
-        ytvosEval.summarize()
+        # ytvosEval.summarize()
+        stats = ytvosEval.summarize(show=show)
+    return stats
 
 def coco_eval(result_file, result_types, coco, max_dets=(100, 300, 1000)):
     for res_type in result_types:
@@ -165,11 +172,12 @@ def segm2json(dataset, results):
 def results2json_videoseg(dataset, results, out_file):
     json_results = []
     vid_objs = {}
-    for idx in range(len(dataset)):
+    len_datase = len(dataset.img_ids)
+    for idx in range(len_datase):
       # assume results is ordered
 
       vid_id, frame_id = dataset.img_ids[idx]
-      if idx == len(dataset) - 1 :
+      if idx == len_datase - 1 :
         is_last = True
       else:
         _, frame_id_next = dataset.img_ids[idx+1]
@@ -215,3 +223,93 @@ def results2json(dataset, results, out_file):
     else:
         raise TypeError('invalid type of results')
     mmcv.dump(json_results, out_file)
+
+
+def results2json_img(dataset, results, out_file=None):
+    json_results = []
+    vid_objs = {}
+    data = dict()
+    # assume results is ordered
+    idx = 0
+    vid_id, frame_id = dataset.img_ids[idx]
+    det, seg = results[idx]
+
+    if len(det) == 0:
+        data['video_id'] = vid_id + 1
+        json_results.append(data)
+    else:
+        for obj_id in det:
+            bbox = det[obj_id]['bbox']
+            segm = seg[obj_id]
+            label = det[obj_id]['label']
+            if obj_id not in vid_objs:
+              vid_objs[obj_id] = {'scores':[],'cats':[], 'segms':{}}
+            vid_objs[obj_id]['scores'].append(bbox[4])
+            vid_objs[obj_id]['cats'].append(label)
+            segm['counts'] = segm['counts'].decode()
+            vid_objs[obj_id]['segms'][frame_id] = segm
+        # if is_last:
+        # store results of  the current video
+        for obj_id, obj in vid_objs.items():
+          data = dict()
+
+          data['video_id'] = vid_id + 1
+          data['score'] = np.array(obj['scores']).mean().item()
+          # majority voting for sequence category
+          data['category_id'] = np.bincount(np.array(obj['cats'])).argmax().item() + 1
+          vid_seg = []
+          for fid in range(frame_id + 1):
+            if fid in obj['segms']:
+              vid_seg.append(obj['segms'][fid])
+            else:
+              vid_seg.append(None)
+          data['segmentations'] = vid_seg
+          json_results.append(data)
+    if out_file:
+        mmcv.dump(json_results, out_file)
+    return json_results
+
+
+def eval_VIS_img(result, groundtruth):
+
+    pass
+
+
+def computeIoU(gt, dt):
+    from mmdet.datasets.eval import mask as maskUtils
+
+    if len(gt) == 0 and len(dt) == 0:
+        return []
+    inds = np.argsort([-d['score'] for d in dt], kind='mergesort')
+    dt = [dt[i] for i in inds]
+    if len(dt) > 100:
+        dt = dt[0:100]
+
+    g = [g['segmentations'] for g in gt]
+    d = [d['segmentations'] for d in dt]
+
+    # compute iou between each dt and gt region
+    iscrowd = [int(o['iscrowd']) for o in gt]
+
+    # ious = maskUtils.iou(d,g,iscrowd)
+    def iou_seq(d_seq, g_seq):
+        i = .0
+        u = .0
+        for d, g in zip(d_seq, g_seq):
+            if d and g:
+                i += maskUtils.area(maskUtils.merge([d, g], True))
+                u += maskUtils.area(maskUtils.merge([d, g], False))
+            elif not d and g:
+                u += maskUtils.area(g)
+            elif d and not g:
+                u += maskUtils.area(d)
+        if not u > .0:
+            print("Mask sizes in video {} and category {} may not match!")
+        iou = i / u if u > .0 else .0
+        return iou
+
+    ious = np.zeros([len(d), len(g)])
+    for i, j in np.ndindex(ious.shape):
+        ious[i, j] = iou_seq(d[i], g[j])
+    # print(vidId, catId, ious.shape, ious)
+    return ious

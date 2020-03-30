@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 import mmcv
 import torchvision.models as models
+import torch.nn.functional as F
 
 from .base import BaseDetector
 from .test_mixins import RPNTestMixin, BBoxTestMixin, MaskTestMixin
@@ -16,8 +17,9 @@ from .. import builder
 from ..registry import DETECTORS
 from mmdet.core import bbox2roi, bbox2result, build_assigner, build_sampler
 from mmdet.core import bbox_overlaps, bbox2result_with_id
-from ..flow_heads.propagation_utils import warp, gather_nd
-from ..decision_net.utils import resize, change_img_meta, trans_action
+# from ..flow_heads.propagation_utils import warp
+from ..flow_heads.propagation_utils_deprecated import warp
+# from ..decision_net.utils import resize, change_img_meta, trans_action
 from mmdet.models.flow_heads import FlowNetC, flownetc
 
 
@@ -101,7 +103,7 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
         # self.flow_model.cuda()
         # self.flow_model.eval()
         # from mmdet.models.flow_heads import FlowNetC
-        self.flow_head1 = FlowNetC(batchNorm=False,
+        self.flow_head = FlowNetC(batchNorm=False,
             checkpoint="/home/ubuntu/code/fengda/MaskTrackRCNN/pretrained_models/flownetc_EPE1.766.tar")
         # self.flow_head1.requires_grad = False
 
@@ -145,30 +147,25 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
                       gt_bboxes_ignore,
                       gt_labels,
                       ref_img,  # images of reference frame
-                      ref_bboxes,  # gt bbox of reference frame
-                      gt_pids,  # gt ids of current frame bbox mapped to reference frame
+                      ref_bboxes=None,  # gt bbox of reference frame
+                      gt_pids=None,  # gt ids of current frame bbox mapped to reference frame
                       gt_masks=None,
                       proposals=None,
-                      key_frame=None):
+                      key_frame=None,
+                      train_flow=None,
+                      key_feature_maps=None,
+                      cur_feature_maps=None):
+        if train_flow is not None:
+            return self.train_flow(img, img_meta, gt_bboxes, gt_bboxes_ignore, gt_labels, ref_img, gt_masks,
+                                   key_feature_maps=key_feature_maps, cur_feature_maps=cur_feature_maps)
 
+        return 0, None
         is_first = img_meta[0]['is_first']
         if is_first:
             key_frame = None
 
         # Extract feature
-        if key_frame is None:
-            x, feat_res0 = self.extract_feat(img)
-            key_feat_maps = x
-            # self.key_img = img
-        else:
-            full_img = self.resize(key_frame['img'], img.shape[-2:])
-            feat_last = key_frame['feat_map_last']
-            flow_outputs = self.flow_head1(full_img, img)
-            # from mmdet.models.flow_heads.visualization import plot_flow
-            # plot_flow(flow_outputs[0], 'test.jpg')
-            # feature warping
-            x = self.warp_feat(feat_last, flow_outputs[0]*self.flow_head.div_flow)
-
+        x, feat_res0 = self.extract_feat(img)
         ref_x, ref_feat_res0 = self.extract_feat(ref_img)
 
         losses = dict()
@@ -366,29 +363,22 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
         feat_last = key_feats
         size_full = full_img.shape
         size_current = current_img.shape
-        if size_full[-1] < size_current[-1]:
+        if size_full[-1] >= size_current[-1]:
             size = size_current[-2:]
             full_img = self.resize(full_img, size)
         else:
             size = size_full[-2:]
             current_img = self.resize(current_img, size)
 
-        # Transform data by FlowNet parameters.
-        import torchvision.transforms as transforms
-        flow_transform = transforms.Compose([
-            transforms.
-            transforms.Normalize(mean=[-123.675/58.395, -116.28/57.12, -103.53/57.375], std=[1/58.395, 1/57.12, 1/57.375]),
-            # transforms.Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
-            transforms.Normalize(mean=[104.805, 110.16, 114.75], std=[255, 255, 255]),
-        ])
-
-        full_img_flow = flow_transform(full_img.squeeze(0)).unsqueeze(0)
-        current_img_flow = flow_transform(current_img.squeeze(0)).unsqueeze(0)
-        flow_output = self.flow_head1(full_img_flow, current_img_flow)[0]*20
-
-        # x, _ = self.extract_feat(img)
-        img_size = img.shape[-2:]
-        x = self.warp_feat(feat_last, flow_output, (img_size[0], img_size[1]), mode='warp')
+        # flow
+        flow_output = self.flow_head(full_img, current_img)
+        upsampling = None
+        if upsampling is not None:
+            flow_output = F.interpolate(flow_output, size=current_img.size()[-2:], mode='bilinear', align_corners=False)
+        # extract feat
+        x, _ = self.extract_feat(img)
+        # img_size = img.shape[-2:]
+        # x = self.warp_feat(feat_last, flow_output*20, (img_size[0], img_size[1]), mode='warp')
         proposal_list = self.simple_test_rpn(
             x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
 
@@ -407,9 +397,8 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
                 feat.append((x[i] + _tmp))
 
             return tuple(feat)
-
-        # img_size = img.shape[-2:]
-        # x = self.warp_feat(feat_last, flow_output*20, (img_size[0], img_size[1]), mode='warp')
+        img_size = img.shape[-2:]
+        x = self.warp_feat(feat_last, flow_output*20, (img_size[0], img_size[1]), mode='warp')
         # x_flow = self.warp_feat(feat_last, flow_outputs1)
         # x1 = [resize(x_f, x11.shape[-2:]) for x_f, x11 in zip(x_flow, x)]
         # x1 = feat_fusion(x, x_flow)
@@ -440,85 +429,6 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
 
         return result
 
-        if is_first:
-            scale_factor = 1
-            self.frame_idx = 0
-            # extract feature maps
-            x, feat_res0 = self.extract_feat(img)
-            self.key_feat_maps = x
-            self.key_feat_res0 = feat_res0
-            self.key_img = img  # last full img
-
-            # Get initial state
-            self.feat_self_key = resize(self.get_self_feat(img), scale_factor=self.scale_factors[-1])
-
-        else:
-            self.frame_idx += 1
-            # Get current state.
-            current_low_img = resize(img, scale_factor=self.scale_factors[-1])
-            self.feat_self = self.get_self_feat(current_low_img)
-            self.feat_diff = self.feat_self_key - self.feat_self
-            self.state = [self.feat_self, self.feat_diff, self.feat_FAR, self.feat_history]
-
-            # Get Scale Factor
-            try:
-                action = self.rl_net(self.state)
-                scale_factor = self.scale_factors[trans_action(action)]
-            except:
-                action = 0
-                scale_factor = 1
-
-            if scale_factor in [1]:
-                # extract feature maps
-                x, feat_res0 = self.extract_feat(img)
-                self.key_feat_maps = x
-                self.key_feat_res0 = feat_res0
-                self.key_img = img  # last full img
-
-                # Get initial state
-                self.feat_self_key = resize(self.get_self_feat(img), scale_factor=self.scale_factors[-1])
-                self.feat_FAR = (self.feat_FAR * self.frame_idx + 1) / (self.frame_idx + 1)
-
-            else:
-                current_img = resize(img, scale_factor=scale_factor)
-                size_full = self.key_img.shape
-                size_current = current_img.shape
-                if size_full[-1] > size_current[-1]:
-                    size = size_current[-2:]
-                    full_img = self.resize(self.key_img, size)
-                else:
-                    size = size_full[-2:]
-                    full_img = self.key_img
-                    current_img = self.resize(current_img, size)
-
-                flow_outputs = self.flow_head(full_img, current_img)
-                # feature warping
-                feat_stride = [4, 8, 16, 32, 64]
-                x = [warp(feat_map, flow_outputs / stride) for (feat_map, stride) in zip(self.key_feat_maps, feat_stride)]
-
-            # 历史动作特征
-            self.feat_history[:-1] = self.feat_history[1:]
-            self.feat_history[-1] = action
-        # print(scale_factor)
-        # get proposal list
-        proposal_list = self.simple_test_rpn(
-            x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
-
-        # get bbox results
-        det_bboxes, det_labels, det_obj_ids = self.simple_test_bboxes(
-            x, img_meta, proposal_list, self.test_cfg.rcnn, rescale=rescale)
-        bbox_results = bbox2result_with_id(det_bboxes, det_labels, det_obj_ids,
-                                           self.bbox_head.num_classes)
-
-        if not self.with_mask:
-            return bbox_results
-        else:
-            segm_results = self.simple_test_mask(
-                    x, img_meta, det_bboxes, det_labels,
-                    rescale=rescale, det_obj_ids=det_obj_ids)
-
-            return bbox_results, segm_results
-
     def aug_test(self, imgs, img_metas, rescale=False):
         """Test with augmentations.
 
@@ -548,30 +458,159 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
         else:
             return bbox_results
 
+    def train_flow(self,
+                      img,  # images of key frame
+                      img_meta,
+                      gt_bboxes,
+                      gt_bboxes_ignore,
+                      gt_labels,
+                      cur_img,  # images of current frame
+                      gt_masks=None,
+                      proposals=None,
+                      rescale=False,
+                      upsampling = None,
+                      key_feature_maps=None,
+                      cur_feature_maps=None):
+        with torch.autograd.set_detect_anomaly(True):
+            losses = dict()
+            # extract feature maps of key frame
+            if key_feature_maps is not None:
+                x_key = key_feature_maps
+            else:
+                x_key, _ = self.extract_feat(img)
+
+            img = self.resize(img, cur_img.shape[-2:])
+            if cur_feature_maps is not None:
+                x = cur_feature_maps
+            else:
+                # extract feature maps of current frame
+                x, _ = self.extract_feat(cur_img)
+
+            # detect
+            proposal_list = self.simple_test_rpn(
+                x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
+            rois = bbox2roi(proposal_list, stack=False)
+            roi_feats = [self.bbox_roi_extractor(
+                x[:len(self.bbox_roi_extractor.featmap_strides)], roi) for roi in rois]
+            _results = [self.bbox_head(roi_feat) for roi_feat in roi_feats]
+            img_shape = img_meta[0]['img_shape']
+            scale_factor = img_meta[0]['scale_factor']
+            det_results = [self.bbox_head.get_det_bboxes(
+                roi,
+                cls_score,
+                bbox_pred,
+                img_shape,
+                scale_factor,
+                rescale=rescale,
+                cfg=self.test_cfg.rcnn) for (roi, (cls_score, bbox_pred)) in zip(rois, _results)]
+            det_bboxes = [det_result[0] for det_result in det_results]
+            det_labels = [det_result[1] for det_result in det_results]
+
+            device = det_bboxes[0].device
+            for i, det_bbox in enumerate(det_bboxes):
+                if len(det_bbox) == 0:
+                    det_bboxes[i] = torch.tensor([[0, 0, img_shape[1], img_shape[0], 1]]).to(device).float()
+                    det_labels[i] = torch.tensor([[-1]]).to(device).float()
+
+            # calculate flow output
+            flow_output = self.flow_head(img, cur_img)
+            if upsampling is not None:
+                flow_output = F.interpolate(flow_output, size=cur_img.size()[-2:], mode='bilinear', align_corners=False)
+
+            # flow_output.mean().backward()
+            # feature warping
+            img_size = cur_img.shape[-2:]
+            x = self.warp_feat(x_key, flow_output*20, (img_size[0], img_size[1]), mode='warp')
+
+            # mask prediction
+            # if det_bboxes is rescaled to the original image size, we need to
+            # rescale it back to the testing scale to obtain RoIs.
+            scale_factor = img_meta[0]['scale_factor']
+            _bboxes = (det_bboxes[:, :4] * scale_factor
+                       if rescale else det_bboxes)
+            mask_rois = bbox2roi(_bboxes, stack=False)
+            mask_feats = [self.mask_roi_extractor(
+                x[:len(self.mask_roi_extractor.featmap_strides)], mask_roi) for mask_roi in mask_rois]
+            mask_pred = [self.mask_head(mask_feat) for mask_feat in mask_feats if mask_feat.size()[0] > 0]
+            # mask_pred[0].backward()
+
+            # mask ground truths
+            def assign_gt_single(det_bbox, gt_bbox, pos_iou_thr = 0.5):
+                bboxes = det_bbox[:, :4]
+                overlaps = bbox_overlaps(gt_bbox, bboxes)
+                # for each gt, which predict best overlaps with it
+                # for each gt, the max iou of all predictions
+                max_overlaps, argmax_overlaps = overlaps.max(dim=1)
+                num_gts, num_bboxes = overlaps.size(0), overlaps.size(1)
+                assigned_gt_inds = overlaps.new_full((num_gts,), -1, dtype=torch.long)
+                # assign positive: above positive IoU threshold
+                pos_inds = max_overlaps >= pos_iou_thr
+                assigned_gt_inds[pos_inds] = argmax_overlaps[pos_inds]
+                return assigned_gt_inds
+
+            assigned_gt_inds = [assign_gt_single(det_bbox, gt_bbox) for (det_bbox, gt_bbox) in zip(det_bboxes, gt_bboxes)]
+
+            def mask_target_single(gt_bboxes, gt_masks, cfg):
+                # get mask(28X28) for each bbox.
+                mask_size = cfg.mask_size
+                num_gt = gt_bboxes.size(0)
+                mask_targets = []
+                if num_gt > 0:
+                    gt_bboxes_np = gt_bboxes.cpu().numpy()
+                    # pos_assigned_gt_inds = pos_assigned_gt_inds.cpu().numpy()
+                    for i in range(num_gt):
+                        gt_mask = gt_masks[i]
+                        bbox = gt_bboxes_np[i, :].astype(np.int32)
+                        x1, y1, x2, y2 = bbox
+                        w = np.maximum(x2 - x1 + 1, 1)
+                        h = np.maximum(y2 - y1 + 1, 1)
+                        # mask is uint8 both before and after resizing
+                        target = mmcv.imresize(gt_mask[y1:y1 + h, x1:x1 + w],
+                                               (mask_size, mask_size))
+                        mask_targets.append(target)
+                    mask_targets = torch.from_numpy(np.stack(mask_targets)).float().to(
+                        gt_bboxes.device)
+                else:
+                    mask_targets = gt_bboxes.new_zeros((0, mask_size, mask_size))
+                return mask_targets
+
+            mask_targets = torch.cat(
+                [mask_target_single(gt_bbox, gt_mask, self.train_cfg.rcnn) for (gt_bbox, gt_mask) in zip(gt_bboxes, gt_masks)])
+
+            mask_size = self.train_cfg.rcnn.mask_size
+            mask_p = []
+            pos_labels = []
+
+            # assign predicted mask and label to each mask target.
+            for i in range(len(mask_pred)):
+                assigned_gt_ind = assigned_gt_inds[i]
+                for id in assigned_gt_ind:
+                    if id == -1:
+                        mask = mask_pred[i].new_zeros((1, 41, mask_size, mask_size))
+                        # label = torch.tensor(0).long().to(device)
+                        label = gt_labels[0].new_zeros((1,))
+                    else:
+                        mask = mask_pred[i][id].unsqueeze(0)
+                        label = det_labels[i][id] + 1
+                    mask_p.append(mask)
+                    pos_labels.append(torch.tensor([label]).long().to(device))
+            mask_p = torch.cat(mask_p)
+            # pos_labels = torch.cat(pos_labels)
+            # TODO pos_labels = gt_labels or det_labels?
+            pos_labels = torch.cat(gt_labels)
+
+            # calculate loss
+            loss_mask = self.mask_head.loss(mask_p, mask_targets,
+                                            pos_labels)
+            losses.update(loss_mask)
+        torch.cuda.empty_cache()
+        return losses
+
     @staticmethod
     def resize(feat_map, size=(48, 64)):
         """Resize feature map to certain size."""
-        key_feature = torch.nn.functional.interpolate(feat_map, size, mode='bilinear', align_corners=True)
+        key_feature = torch.nn.functional.interpolate(feat_map, size, mode='bilinear', align_corners=False)
         return key_feature
-
-    def get_self_feat(self, input):
-        '''
-        :param self:
-        :param img_tensor: a tensor with size of batchsize * channels * height * weight
-        :return:
-        '''
-        model = self.res_model
-        model.eval()
-
-        x = input
-        x = model.conv1(x)
-        x = model.bn1(x)
-        x = model.relu(x)
-        x = model.maxpool(x)
-        x = model.layer1(x)
-        # print(x.size())
-
-        return x
 
     def warp_feat(self, feat_maps, flow, img_size, feat_stride=(4, 8, 16, 32, 64), mode='warp'):
         assert mode in ['warp', 'gather'], "Ensure mode in ['warp', 'gather']."
@@ -579,12 +618,12 @@ class TwoStageDetectorFlowTest(BaseDetector, RPNTestMixin,
             flow = flow.unsqueeze(0)
         sizes = [(int(img_size[0]/stride), int(img_size[1]/stride)) for stride in feat_stride]
         if feat_maps[0].shape[-2:] != sizes[0]:
-            feat_maps = [self.resize(feat, size) for (feat, size) in zip(feat_maps, sizes)]
+            feat_maps = [self.resize(feat, size) if feat.shape[-2:] != size else feat for (feat, size) in zip(feat_maps, sizes)]
         if mode == 'warp':
             x = [warp(feat_map, flow / stride) for (feat_map, stride) in zip(feat_maps, feat_stride)]
-            # flows = [self.resize(flow, size) for (size) in sizes]
-            # y = [gather_nd(feat_map, flow / stride) for (feat_map, flow, stride) in zip(feat_maps, flows, feat_stride)]
         elif mode == 'gather':
+            from mmdet.models.flow_heads.propagation_utils_deprecated import gather_nd
             flows = [self.resize(flow, size) for (size) in sizes]
             x = [gather_nd(feat_map, flow / stride) for (feat_map, flow, stride) in zip(feat_maps, flows, feat_stride)]
+
         return x

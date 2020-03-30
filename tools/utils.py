@@ -82,15 +82,18 @@ if __name__ == "__main__":
     # IMAGE_SAVE_PATH = '/home/ubuntu/code/fengda/MaskTrackRCNN/results/test/flow/compose/0/'
     # if not os.path.exists(IMAGE_SAVE_PATH):
     #     os.makedirs(IMAGE_SAVE_PATH)
-    path = "/home/ubuntu/datasets/YT-VIS/results/train"
+    path = "/home/ubuntu/datasets/YT-VIS/results/valid-flow/"
     file_names = os.listdir(path)
     file_names.sort()
+    # file_names = ['0065b171f9', '01c76f0a82', '4083cfbe15']
+    # import pandas as pd
+    # file_names = list(pd.read_csv('val.csv').video_name)
     from tqdm import tqdm
     for file in tqdm(file_names):
         # print(file)
-        save_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/results/compose/train-flow20/", file)
-        orig_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/train/JPEGImages/", file)
-        mask_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/results/train-flow20/", file)
+        save_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/results/compose/valid-flow2/", file)
+        orig_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/valid/JPEGImages/", file)
+        mask_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/results/valid-flow2/", file)
         folder_compose(mask_folder, orig_folder, save_folder, anno=True)
 
     # orig_folder = "/home/ubuntu/datasets/YT-VIS/train/JPEGImages/05a0a513df"

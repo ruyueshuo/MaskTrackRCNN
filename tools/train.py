@@ -13,14 +13,14 @@ import torch
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
-    parser.add_argument('--config', default="../configs/masktrack_rcnn_r50_fpn_1x_flow_youtubevos.py",
+    parser.add_argument('--config', default="../configs/masktrack_rcnn_r50_fpn_1x_youtubevos.py",
                         help='train config file path')
     parser.add_argument('--work_dir', default="../results/",
                         help='the dir to save logs and models')
     parser.add_argument(
         '--resume_from',
         # default=None,
-        default = "/home/ubuntu/code/fengda/MaskTrackRCNN/results/20200225-125037/epoch_11.pth",
+        default = "/home/ubuntu/code/fengda/MaskTrackRCNN/results/20200309-215617/epoch_8.pth",
         # default="../results/20191213-113208/epoch_15.pth",
         # default="../pretrained_models/epoch_12.pth",
         help='the checkpoint file to resume from')
@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument(
         '--gpus',
         type=int,
-        default=1,
+        default=2,
         help='number of gpus to use '
         '(only applicable to non-distributed training)')
     parser.add_argument('--seed', type=int, default=41, help='random seed')
@@ -52,7 +52,7 @@ def parse_args():
 
 def main():
     import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
@@ -90,16 +90,17 @@ def main():
         cfg.model, train_cfg=cfg.train_cfg, test_cfg=cfg.test_cfg)
 
     # get dataset
-    from mmdet.models.decision_net.utils import modify_cfg
-    video_name = '0043f083b5'
-    cfg.data.train = modify_cfg(cfg, video_name)
+    # from mmdet.models.decision_net.utils import modify_cfg
+    # video_name = '01c783268c'
+    # cfg.data.train = modify_cfg(cfg, video_name)
     train_dataset = get_dataset(cfg.data.train)
+    val_dataset = get_dataset(cfg.data.val)
     print("len of dataset: {}.".format(len(train_dataset)))
 
     # train
     train_detector(
         model,
-        train_dataset,
+        [train_dataset,val_dataset],
         cfg,
         distributed=distributed,
         validate=args.validate,

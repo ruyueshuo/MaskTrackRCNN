@@ -50,8 +50,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='MMDet test detector')
     parser.add_argument('--config', default="../configs/masktrack_rcnn_r50_fpn_1x_youtubevos.py",
                         help='test config file path')
-    parser.add_argument('--checkpoint', default="../results/20200225-125037/epoch_11.pth", help='checkpoint file')
-    # /home/ubuntu/code/fengda/MaskTrackRCNN/results/20200225-125037/epoch_11.pth
+    parser.add_argument('--checkpoint', default="../results/20200312-180434/epoch_9.pth", help='checkpoint file')
+    # /home/ubuntu/code/fengda/MaskTrackRCNN/results/20200309-215617/epoch_7.pth
     parser.add_argument(
         '--save_path', default="/home/ubuntu/datasets/YT-VIS/results/",
         type=str,
@@ -141,7 +141,7 @@ def main():
             if not isinstance(outputs[0], dict):
                 result_file = args.out + '.json'
                 results2json_videoseg(dataset, outputs, result_file)
-                ytvos_eval(result_file, eval_types, dataset.ytvos)
+                ytvos_eval(result_file, eval_types, dataset.ytvos, show=True)
             else:
                 NotImplemented
 

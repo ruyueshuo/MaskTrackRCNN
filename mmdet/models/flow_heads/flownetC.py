@@ -61,14 +61,14 @@ class FlowNetC(nn.Module):
         self.corr = Correlation(pad_size=20, kernel_size=1, max_displacement=20, stride1=1, stride2=2, corr_multiply=1)
         self.corr_activation = nn.LeakyReLU(0.1, inplace=True)
 
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-                kaiming_normal_(m.weight, 0.1)
-                if m.bias is not None:
-                    constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                constant_(m.weight, 1)
-                constant_(m.bias, 0)
+        # for m in self.modules():
+        #     if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        #         kaiming_normal_(m.weight, 0.1)
+        #         if m.bias is not None:
+        #             constant_(m.bias, 0)
+        #     elif isinstance(m, nn.BatchNorm2d):
+        #         constant_(m.weight, 1)
+        #         constant_(m.bias, 0)
 
         if checkpoint:
             self.checkpoint = checkpoint
@@ -125,8 +125,9 @@ class FlowNetC(nn.Module):
         flow2 = self.predict_flow2(concat2)
 
         if self.training:
-            # torch.cuda.empty_cache()
-            return flow2,flow3,flow4,flow5,flow6
+            torch.cuda.empty_cache()
+            # return flow2,flow3,flow4,flow5,flow6
+            return flow2
         else:
             torch.cuda.empty_cache()
             return flow2

@@ -166,3 +166,11 @@ class ResNetFlow(nn.Module):
             return outs[0], out0
         else:
             return tuple(outs), out0
+
+    def train(self, mode=True):
+        super(ResNetFlow, self).train(mode)
+        if mode and self.norm_eval:
+            for m in self.modules():
+                # trick: eval have effect on BatchNorm only
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()

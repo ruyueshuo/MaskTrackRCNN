@@ -10,6 +10,8 @@ from .transforms import (ImageTransform, BboxTransform, MaskTransform,
 from pycocotools.ytvos import YTVOS
 from mmcv.parallel import DataContainer as DC
 from .utils import to_tensor, random_scale
+import torch
+import torchvision
 
 
 class YTVOSDataset(CustomDataset):
@@ -38,7 +40,8 @@ class YTVOSDataset(CustomDataset):
                  resize_keep_ratio=True,
                  test_mode=False,
                  every_frame=False,
-                 is_flow=False):
+                 is_flow=False,
+                 flow_test=False):
         # prefix of images path
         self.img_prefix = img_prefix
 
@@ -47,11 +50,27 @@ class YTVOSDataset(CustomDataset):
 
         self.every_frame = every_frame
         self.is_flow = is_flow
+        self.flow_test = flow_test
+        if self.flow_test or self.is_flow:
+            self.cuda = True
+        self.cuda = False
+        if self.cuda:
+            from mmcv import Config
+            from mmdet.models import build_detector
+            from mmcv.runner import load_checkpoint
+            cfg = Config.fromfile("../configs/masktrack_rcnn_r50_fpn_1x_flow_youtubevos.py")
+            self.det_model = build_detector(
+                cfg.model, train_cfg=cfg.train_cfg, test_cfg=cfg.test_cfg)
+            load_checkpoint(self.det_model, "../results/20200312-180434/epoch_9.pth")
+            self.det_model = self.det_model.cuda()
+            self.det_model.eval()
+            for param in self.det_model.parameters():
+                param.requires_grad = False
 
         # Set indexes for data loading
-        img_ids = []
-        img_ids_all = []
-        img_ids_pairs = []
+        img_ids = []  # training frames which have annotations
+        img_ids_all = []  # all training frames
+        img_ids_pairs = []  # flow data pairs
         for idx, vid_info in enumerate(self.vid_infos):
             vid_name = vid_info['filenames'][0].split('/')[0]
             folder_path = osp.join(self.img_prefix, vid_name)
@@ -62,6 +81,13 @@ class YTVOSDataset(CustomDataset):
                 img_ids_all.append((idx, _id))
                 is_anno = vid_info['filenames_all'][_id] in vid_info['filenames']
                 if is_anno and _id > 0:  # having annotation and is not the first frame.
+                    ann_idx = vid_info['filenames'].index(vid_info['filenames_all'][_id])
+                    ann = self.get_ann_info(idx, ann_idx)
+                    gt_bboxes = ann['bboxes']
+                    # skip the image if there is no valid gt bbox
+                    if len(gt_bboxes)==0:
+                        continue
+                    # random select key frame
                     key_id = _id - np.random.randint(1, min(10, _id))
                     img_ids_pairs.append(((idx, key_id), (idx, _id)))
             for frame_id in range(len(vid_info['filenames'])):
@@ -132,6 +158,8 @@ class YTVOSDataset(CustomDataset):
     def __len__(self):
         if self.every_frame:
             return len(self.img_ids_all)
+        elif self.is_flow:
+            return len(self.img_ids_pairs)
         else:
             return len(self.img_ids)
 
@@ -142,7 +170,10 @@ class YTVOSDataset(CustomDataset):
             else:
                 return self.prepare_test_img(self.img_ids[idx])
         if self.is_flow:
-            data = self.prepare_train_flow_img(self.img_ids_pairs[idx])
+            if self.flow_test:
+                data = self.prepare_train_flow_test_img(self.img_ids_pairs[idx])
+            else:
+                data = self.prepare_train_flow_img(self.img_ids_pairs[idx])
         else:
             data = self.prepare_train_img(self.img_ids[idx])
         return data
@@ -219,7 +250,7 @@ class YTVOSDataset(CustomDataset):
         assert len(valid_samples) > 0
         return random.choice(valid_samples)
 
-    def prepare_train_flow_img(self, idx):
+    def prepare_train_flow_test_img(self, idx):
 
         # prepare a pair of image in a sequence
         vid, key_frame_id = idx[0]
@@ -230,6 +261,58 @@ class YTVOSDataset(CustomDataset):
         key_img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][key_frame_id]))
         cur_img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][cur_frame_id]))
         h_orig, w_orig, _ = key_img.shape
+        basename = osp.basename(vid_info['filenames_all'][key_frame_id])
+
+        # apply transforms
+        flip = True if np.random.rand() < self.flip_ratio else False
+        img_scale = random_scale(self.img_scales)  # sample a scale
+        cur_img, img_shape, pad_shape, scale_factor = self.img_transform(
+            cur_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
+        if (type(scale_factor)) != float:
+            scale_factor = tuple(scale_factor)
+        cur_img = cur_img.copy()
+        key_img, key_img_shape, _, ref_scale_factor = self.img_transform(
+            key_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
+        key_img = key_img.copy()
+
+        # trans = torchvision.transforms.ToTensor()
+        key_img = torch.from_numpy(key_img).cuda()
+        cur_img = torch.from_numpy(cur_img).cuda()
+
+        def resize(feat_map, size=(48, 64)):
+            """Resize feature map to certain size."""
+            key_feature = torch.nn.functional.interpolate(feat_map, size, mode='bilinear', align_corners=True)
+            return key_feature
+        img_size = (384, 640)
+        if key_img.shape[-2:] != img_size:
+            key_img = resize(key_img.unsqueeze(0), img_size).squeeze(0)
+            cur_img = resize(cur_img.unsqueeze(0), img_size).squeeze(0)
+
+        key_feature_maps, _ = self.det_model.extract_feat(key_img.unsqueeze(0))
+        cur_feature_maps, _ = self.det_model.extract_feat(cur_img.unsqueeze(0))
+
+        key_feature_maps = [feat_map.squeeze(0) for feat_map in key_feature_maps]
+        cur_feature_maps = [feat_map.squeeze(0) for feat_map in cur_feature_maps]
+
+        data = dict(
+            key_img=key_img,
+            cur_img=cur_img,
+            key_img_feats=key_feature_maps,
+            cur_img_feats=cur_feature_maps
+        )
+        return data
+
+    def prepare_train_flow_img(self, idx):
+
+        # prepare a pair of image in a sequence
+        vid, key_frame_id = idx[0]
+        _, cur_frame_id = idx[1]
+        vid_info = self.vid_infos[vid]
+
+        # load image
+        key_img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][key_frame_id]))
+        cur_img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][cur_frame_id]))
+        h_orig, w_orig, _ = cur_img.shape
         basename = osp.basename(vid_info['filenames_all'][key_frame_id])
 
         # load proposals if necessary
@@ -253,14 +336,7 @@ class YTVOSDataset(CustomDataset):
         ann = self.get_ann_info(vid, ann_idx)
         gt_bboxes = ann['bboxes']
         gt_labels = ann['labels']
-        # ref_bboxes = ref_ann['bboxes']
-        # obj ids attribute does not exist in current annotation
-        # need to add it
-        # ref_ids = ref_ann['obj_ids']
-        # gt_ids = ann['obj_ids']
-        # compute matching of reference frame with current frame
-        # 0 denote there is no matching
-        # gt_pids = [ref_ids.index(i) + 1 if i in ref_ids else 0 for i in gt_ids]
+
         if self.with_crowd:
             gt_bboxes_ignore = ann['bboxes_ignore']
 
@@ -275,14 +351,16 @@ class YTVOSDataset(CustomDataset):
 
         # apply transforms
         flip = True if np.random.rand() < self.flip_ratio else False
-        img_scale = random_scale(self.img_scales)  # sample a scale
+
+        img_scales = [(1280, 720), (640, 360)]
+        # img_scale = random_scale(self.img_scales)  # sample a scale
         cur_img, img_shape, pad_shape, scale_factor = self.img_transform(
-            cur_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
+            cur_img, img_scales[1], flip, keep_ratio=self.resize_keep_ratio)
         if (type(scale_factor)) != float:
             scale_factor = tuple(scale_factor)
         cur_img = cur_img.copy()
-        key_img, key_img_shape, _, ref_scale_factor = self.img_transform(
-            key_img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
+        key_img, key_img_shape, _, key_scale_factor = self.img_transform(
+            key_img, img_scales[0], flip, keep_ratio=self.resize_keep_ratio)
         key_img = key_img.copy()
         if self.proposals is not None:
             proposals = self.bbox_transform(proposals, img_shape, scale_factor,
@@ -291,10 +369,7 @@ class YTVOSDataset(CustomDataset):
                 [proposals, scores]) if scores is not None else proposals
         gt_bboxes = self.bbox_transform(gt_bboxes, img_shape, scale_factor,
                                         flip)
-        # ref_bboxes = self.bbox_transform(ref_bboxes, ref_img_shape, ref_scale_factor,
-        #                                  flip)
-        # if self.aug_ref_bbox_param is not None:
-        #     ref_bboxes = self.bbox_aug(ref_bboxes, ref_img_shape)
+
         if self.with_crowd:
             gt_bboxes_ignore = self.bbox_transform(gt_bboxes_ignore, img_shape,
                                                    scale_factor, flip)
@@ -317,8 +392,8 @@ class YTVOSDataset(CustomDataset):
             flip=flip)
 
         data = dict(
-            key_img=DC(to_tensor(key_img), stack=True),
-            cur_img=DC(to_tensor(cur_img), stack=True),
+            img=DC(to_tensor(key_img), stack=True),
+            ref_img=DC(to_tensor(cur_img), stack=True),
             img_meta=DC(img_meta, cpu_only=True),
             gt_bboxes=DC(to_tensor(gt_bboxes)),
             # ref_bboxes=DC(to_tensor(ref_bboxes))
@@ -333,6 +408,31 @@ class YTVOSDataset(CustomDataset):
             data['gt_bboxes_ignore'] = DC(to_tensor(gt_bboxes_ignore))
         if self.with_mask:
             data['gt_masks'] = DC(gt_masks, cpu_only=True)
+        data['train_flow'] = True
+
+        if self.cuda:
+            key_img_cuda = torch.from_numpy(key_img).cuda()
+            cur_img_cuda = torch.from_numpy(cur_img).cuda()
+
+            def resize(feat_map, size=(48, 64)):
+                """Resize feature map to certain size."""
+                key_feature = torch.nn.functional.interpolate(feat_map, size, mode='bilinear', align_corners=True)
+                return key_feature
+
+            img_size = (384, 640)
+            if key_img_cuda.shape[-2:] != img_size:
+                key_img_cuda = resize(key_img_cuda.unsqueeze(0), img_size).squeeze(0)
+                cur_img_cuda = resize(cur_img_cuda.unsqueeze(0), img_size).squeeze(0)
+
+            key_feature_maps, _ = self.det_model.extract_feat(key_img_cuda.unsqueeze(0))
+            cur_feature_maps, _ = self.det_model.extract_feat(cur_img_cuda.unsqueeze(0))
+
+            key_feature_maps = [feat_map.squeeze(0) for feat_map in key_feature_maps]
+            cur_feature_maps = [feat_map.squeeze(0) for feat_map in cur_feature_maps]
+
+            data['key_feature_maps'] = key_feature_maps
+            data['cur_feature_maps'] = cur_feature_maps
+
         return data
 
     def prepare_train_img(self, idx):
@@ -456,9 +556,14 @@ class YTVOSDataset(CustomDataset):
         """Prepare an image for testing (multi-scale and flipping)"""
         vid, frame_id = idx
         vid_info = self.vid_infos[vid]
-        img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))
+        is_anno = True
+        if self.every_frame:
+            img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames_all'][frame_id]))
+            is_anno = vid_info['filenames_all'][frame_id] in vid_info['filenames']
+        else:
+            img = mmcv.imread(osp.join(self.img_prefix, vid_info['filenames'][frame_id]))
         proposal = None
-        is_anno = vid_info['filenames_all'][frame_id] in vid_info['filenames']
+
         if self.every_frame:
             file_name = vid_info['filenames_all'][frame_id]
         else:

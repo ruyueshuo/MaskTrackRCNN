@@ -52,8 +52,6 @@ def flow2rgb(flow_map, max_value):
 
 def cal_flow(img1_file, img2_file, flow_model, save_path,
              div_flow=20, output_value='vis', max_flow=20, plot=True):
-
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     # Data loading code
     input_transform = transforms.Compose([
         ArrayToTensor(),
@@ -62,18 +60,6 @@ def cal_flow(img1_file, img2_file, flow_model, save_path,
         transforms.Normalize(mean=[104.805, 110.16, 114.75], std=[255, 255, 255])
         # transforms.Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
     ])
-
-    # flow_network_data = torch.load("/home/ubuntu/code/fengda/MaskTrackRCNN/pretrained_models/flownetc_EPE1.766.tar")
-    # print("=> using pre-trained model '{}'".format(flow_network_data['arch']))
-    # flow_model = FlowNetC(batchNorm=False)
-    # # model = models.__dict__[network_data['arch']](network_data).to(device)
-    # flow_model.load_state_dict(flow_network_data['state_dict'])
-    # # flow_model = models.__dict__[flow_network_data['arch']](flow_network_data).cuda()
-    flow_model.to(device)
-    flow_model.eval()
-
-    # model = FlowNetC(checkpoint=checkpoint, batchNorm=False)
-    # model.to(device)
 
     img1 = input_transform(imread(img1_file))
     img2 = input_transform(imread(img2_file))
@@ -117,20 +103,8 @@ def cal_flow(img1_file, img2_file, flow_model, save_path,
 
     if plot:
         filename = os.path.join(save_path, '{}-{}'.format(os.path.basename(img1_file)[:-4], 'flow'))
-        plot_flow(output, filename, output_value='vis', div_flow=20, max_flow=max_flow)
+        plot_flow(output, filename, output_value='both', div_flow=20, max_flow=20)
     return True
-    # for suffix, flow_output in zip(['flow', 'inv_flow'], output):
-    #     tmp = os.path.basename(img1_file)
-    #     filename = os.path.join(save_path, '{}-{}'.format(os.path.basename(img1_file)[:-4], suffix))
-    #     if output_value in ['vis', 'both']:
-    #         rgb_flow = flow2rgb(div_flow * flow_output, max_value=max_flow)
-    #         to_save = (rgb_flow * 255).astype(np.uint8).transpose(1, 2, 0)
-    #         imwrite(filename + '.png', to_save)
-    #     if output_value in ['raw', 'both']:
-    #         # Make the flow map a HxWx2 array as in .flo files
-    #         to_save = (div_flow * flow_output).cpu().numpy().transpose(1, 2, 0)
-    #         np.save(filename + '.npy', to_save)
-    # pass
 
 
 def plot_flow(output, filename, output_value='vis', div_flow=20, max_flow=None):
@@ -143,7 +117,9 @@ def plot_flow(output, filename, output_value='vis', div_flow=20, max_flow=None):
             imwrite(filename + '.png', to_save)
         if output_value in ['raw', 'both']:
             # Make the flow map a HxWx2 array as in .flo files
-            to_save = (div_flow * flow_output).cpu().numpy().transpose(1, 2, 0)
+            to_save = (div_flow * flow_output.detach()).cpu().numpy().transpose(1, 2, 0)
+            to_comp = np.load("/home/ubuntu/datasets/YT-VIS/flow/003234408d/00005-flow.npy")
+            diff = to_save - to_comp
             np.save(filename + '.npy', to_save)
 
 
@@ -162,21 +138,24 @@ def folder_flow(img_folder, save_folder, flow_model):
 
 
 if __name__ == '__main__':
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     checkpoint = "/home/ubuntu/code/fengda/MaskTrackRCNN/pretrained_models/flownetc_EPE1.766.tar"
     flow_model = FlowNetC(batchNorm=False, checkpoint=checkpoint)
-    # path = "/home/ubuntu/datasets/YT-VIS/results/train"
+    flow_model.to(device)
+    flow_model.eval()
+    path = "/home/ubuntu/datasets/YT-VIS/results/train"
     # file_names = os.listdir(path)
     # file_names.sort()
     # from tqdm import tqdm
     # for file in tqdm(file_names):
     #     # print(file)
-    #     save_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/results/flow/", file)
+    #     save_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/results/flow-max/", file)
     #     img_folder = os.path.join("/home/ubuntu/datasets/YT-VIS/train/JPEGImages/", file)
     #     folder_flow(img_folder, save_folder, flow_model)
 
-    save_path = "/home/ubuntu/datasets/YT-VIS/results/flow/05a0a513df/"
-    # img_folder = "/home/ubuntu/datasets/YT-VIS/train/JPEGImages/05a0a513df"
-
+    save_path = "/home/ubuntu/datasets/YT-VIS/flow/003234408d/"
+    # # img_folder = "/home/ubuntu/datasets/YT-VIS/train/JPEGImages/05a0a513df"
+    #
     img1_file = "/home/ubuntu/datasets/YT-VIS/train/JPEGImages/003234408d/00000.jpg"
     img2_file = "/home/ubuntu/datasets/YT-VIS/train/JPEGImages/003234408d/00005.jpg"
     cal_flow(img2_file, img1_file, flow_model, save_path)
