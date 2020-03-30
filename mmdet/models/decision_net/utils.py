@@ -45,7 +45,7 @@ def change_img_meta(data, scale_factor):
 def resize(img, scale_factor, size_divisor=None):
     # resize image according to scale factor.
     if isinstance(scale_factor, tuple):
-        img = nn.functional.interpolate(img, scale_factor, mode='bilinear', align_corners=True)
+        img = nn.functional.interpolate(img, scale_factor, mode='bilinear', align_corners=False)
     else:
         img = nn.functional.interpolate(img, scale_factor=scale_factor, mode='bilinear', align_corners=True)
 
@@ -86,7 +86,7 @@ def get_dataloader(dataset):
     return data_loader
 
 
-def get_VIS_data(loader, index, dataset=None, size=(384, 640)):
+def get_VIS_data(loader, index, dataset=None, size=(736, 1280)):
     data = dataset[index]
     return container_to_tensor(data, size=size)
 
@@ -170,7 +170,12 @@ def get_self_feat(model, input, feat_size=(24, 40)):
     :param img_tensor: a tensor with size of batchsize * channels * height * weight
     :return:
     '''
-    outs, out0 = model.extract_feat(input)
+    input = input.cuda()
+    from mmcv.parallel import scatter, collate, MMDataParallel
+    if isinstance(model, MMDataParallel):
+        outs, out0 = model.module.extract_feat(input)
+    else:
+        outs, out0 = model.extract_feat(input)
     if outs[0].shape[-2:] != feat_size:
         return resize(outs[0], feat_size)
     else:

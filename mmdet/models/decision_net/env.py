@@ -25,6 +25,7 @@ from .memory import ReplayMemory
 from .utils import *
 from pycocotools.ytvos import YTVOS
 from pycocotools.ytvoseval import YTVOSeval
+from mmcv.parallel import scatter, collate, MMDataParallel
 
 
 class DecisionEnv(object):
@@ -263,7 +264,10 @@ class DecisionEnv(object):
         :param img_tensor: a tensor with size of batchsize * channels * height * weight
         :return:
         '''
-        outs, out0 = self.model.extract_feat(input)
+        if isinstance(self.model, MMDataParallel):
+            outs, out0 = self.model.module.extract_feat(input)
+        else:
+            outs, out0 = self.model.extract_feat(input)
         if outs[0].shape[-2:] != self.feat_size:
             return resize(outs[0], self.feat_size)
         else:

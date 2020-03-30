@@ -6,7 +6,8 @@
 # @Software: PyCharm
 import os
 import random
-import pickle
+# import pickle
+import _pickle as pickle
 import numpy as np
 from collections import namedtuple
 
@@ -42,7 +43,8 @@ class ReplayBuffer(object):
     def __init__(self, capacity, seed,
                  priority_weight=None, priority_exponent=None,
                  priotirized_experience=False,
-                 save_path="/home/ubuntu/data/replaybuffer/"):
+                 resume=False,
+                 save_path="/home/ubuntu/data/replaybuffertest10w/"):
         self.capacity = capacity
         self.position = 0
         self.prioritize = priotirized_experience
@@ -52,6 +54,11 @@ class ReplayBuffer(object):
             self.memory = []
         else:
             self.memory = []
+
+        # Resuming from an existing replay buffer from hard disk.
+        if resume:
+            self.memory = [i for i in range(self.capacity)]
+
         # Seed for reproducible results
         np.random.seed(seed)
         self.save_path = save_path
@@ -79,6 +86,19 @@ class ReplayBuffer(object):
 
     def sample_batch_hd(self, batch_size):
         idxes = random.sample(self.memory, batch_size)
+        # from multiprocessing.pool import Pool
+        # dataset = [os.path.join(self.save_path, "{}.pkl".format(idx)) for idx in idxes]
+        # p = Pool(4)
+        # transitions = p.map(load_trans, dataset)
+        # for i in range(10):
+        #     # 创建进程，放入进程池统一管理
+        #     p.apply_async(load_trans, args=(i,))
+        # import concurrent.futures
+        # dataset = [os.path.join(self.save_path, "{}.pkl".format(idx)) for idx in idxes]
+        # with concurrent.futures.ProcessPoolExecutor() as executor:
+        #
+        #     transitions = executor.map(load_trans, dataset)
+        # t = transitions.result()
         transitions = [load_trans(os.path.join(self.save_path, "{}.pkl".format(idx))) for idx in idxes]
         return transitions
 
@@ -93,7 +113,8 @@ class PrioritizedReplayBuffer(object):
     """Prioritized Replay Buffer."""
     def __init__(self, capacity,
                  seed=41,
-                 save_path="/home/ubuntu/data/replaybuffer/"):
+                 resume=False,
+                 save_path="/home/ubuntu/data/replaybuffertest10w/"):
         self.capacity = capacity
         self.save_path = save_path
         if not os.path.exists(self.save_path):
@@ -105,6 +126,10 @@ class PrioritizedReplayBuffer(object):
         self.beta_increment_per_sampling = 0.00001  # default is 0.001.
         self.abs_err_upper = 1.  # clipped abs error, default is 1..
         self.memory = []
+        # Resuming from an existing replay buffer from hard disk.
+        if resume:
+            self.memory = [i for i in range(self.capacity)]
+
         self.position = 0
         np.random.seed(seed)
 
@@ -148,6 +173,10 @@ class PrioritizedReplayBuffer(object):
         idxes, memories, ISWeights = self.sample(batch_size)
         # idxes = random.sample(self.memory, batch_size)
         data_idxes = [_idx - self.capacity + 1 for _idx in idxes]
+        import concurrent.futures
+        # with concurrent.futures.ProcessPoolExecutor() as executor:
+        #     dataset = [os.path.join(self.save_path, "{}.pkl".format(idx)) for idx in data_idxes]
+        #     transitions = executor.map(load_trans, dataset)
         transitions = [load_trans(os.path.join(self.save_path, "{}.pkl".format(idx))) for idx in data_idxes]
         return idxes, transitions, ISWeights
 
@@ -231,6 +260,15 @@ def save_trans(trans, filename):
     :param trans: transition to be saved.
     :param filename: file name.
     """
+    # state = [s.clone().cpu().detach().numpy() for s in trans.state]
+    # next_state = [s.clone().cpu().detach().numpy() for s in trans.next_state]
+    # # action = trans.action.clone().cpu().detach().numpy()
+    # # reward = trans.reward.clone().cpu().detach().numpy()
+    # # done = trans.done.clone().cpu().detach().numpy()
+    # action = trans.action
+    # reward = trans.reward
+    # done = trans.done
+    # trans = (state, action, next_state, reward, done)
     with open(filename, 'wb') as f:
         pickle.dump(trans, f)
 
